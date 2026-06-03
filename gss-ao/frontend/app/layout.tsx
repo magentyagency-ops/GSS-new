@@ -1,7 +1,9 @@
-// Layout racine — scaffold minimal (itération 1).
+import type { Metadata } from "next";
+import "./globals.css";
+import { AppSidebar } from "@/components/app-sidebar";
 
-export const metadata = {
-  title: "GSS-AO",
+export const metadata: Metadata = {
+  title: "GSS-AO — Appels d'offres",
   description: "Automatisation du traitement des appels d'offres GSS",
 };
 
@@ -12,7 +14,13 @@ export default function RootLayout({
 }) {
   return (
     <html lang="fr">
-      <body>{children}</body>
+      {/* Pour activer le mode sombre plus tard : ajouter className="dark" sur <html>. */}
+      <body className="font-sans antialiased">
+        <div className="flex h-screen overflow-hidden bg-background">
+          <AppSidebar />
+          <main className="flex-1 overflow-y-auto">{children}</main>
+        </div>
+      </body>
     </html>
   );
 }
