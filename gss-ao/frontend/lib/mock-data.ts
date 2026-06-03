@@ -302,3 +302,188 @@ export function formatDateHeure(iso: string): string {
     minute: "2-digit",
   });
 }
+
+/* ===================================================================== */
+/* Écran 6 — Export : template imposé (cadre de réponse Univ Rouen)       */
+/* Champs AJOUTÉS pour la refonte de l'écran 6 — n'altèrent aucun champ   */
+/* existant utilisé par les écrans 1 à 5.                                 */
+/* ===================================================================== */
+
+export interface OptionCochee {
+  label: string;
+  checked: boolean;
+}
+export interface Contact {
+  nom: string;
+  fonction: string;
+  tel: string;
+  email: string;
+}
+
+export const IDENTITE_CANDIDAT = {
+  denomination: "GSS — Sécurité privée",
+  num_cnaps: "AUT-076-2122-12-15-20230456789",
+  date_autorisation: "15 décembre 2023",
+};
+
+/* --- Section I — Moyens humains ------------------------------------- */
+export const SECTION_I = {
+  num: "I",
+  titre: "Moyens humains affectés spécifiquement au marché",
+  points: 20,
+  sousQuestions: [
+    {
+      n: 1,
+      label: "Moyens humains dédiés au marché : qualifications et expérience",
+      reponse:
+        "GSS affecte une équipe dédiée encadrée par un chef d'équipe SSIAP2 coordinateur " +
+        "sûreté-sécurité et son adjoint. Les agents sont des APS titulaires de la carte " +
+        "professionnelle CNAPS, SSIAP1 pour les postes incendie, avec recyclages à jour " +
+        "(SST, H0B0). Conformément au CCTP, l'ensemble des agents en poste fait l'objet d'une " +
+        "reprise du personnel (art. L1224-1) garantissant la continuité de service.",
+    },
+    {
+      n: 2,
+      label: "Moyens humains dédiés pour chaque prestation campus",
+      reponse:
+        "Les effectifs sont calibrés sur l'annexe 1 du CCTP : campus principal de " +
+        "Mont-Saint-Aignan (PC sécurité + postes de filtrage), Rouen-Pasteur, Madrillet et " +
+        "Martainville pour le lot 1 (76) ; campus d'Évreux pour le lot 2 (27). Le chef " +
+        "d'équipe SSIAP2 coordonne l'ensemble et assure l'interface avec l'Université.",
+    },
+  ],
+  soustraitance: {
+    label:
+      "Utilisation envisagée de la sous-traitance pour les prestations fixes ou supplémentaires",
+    options: [
+      { label: "Oui (niveau N-1)", checked: false },
+      { label: "Oui (niveau N-2 en cascade)", checked: false },
+      { label: "Non", checked: true },
+    ] as OptionCochee[],
+  },
+  dispositifAbsence: {
+    label:
+      "Dispositif prévu pour pallier à l'absence d'un ou plusieurs agents à leur poste",
+    reponse:
+      "Volant de remplacement régional mobilisable sous 1 heure, doublé d'une astreinte 24/7. " +
+      "Planification anticipée des congés et binômage des postes garantissent la continuité de " +
+      "service, sans rupture de présence sur les sites sensibles.",
+  },
+  interlocuteurPrincipal: {
+    label:
+      "Coordonnées de l'interlocuteur principal pour la gestion opérationnelle du marché",
+    contact: {
+      nom: "Karim Benali",
+      fonction: "Responsable d'exploitation",
+      tel: "06 12 34 56 78",
+      email: "k.benali@gss-securite.fr",
+    } as Contact,
+  },
+  interlocuteurDevis: {
+    label:
+      "Coordonnées de l'interlocuteur pour la réalisation des devis concernant les prestations à la demande",
+    contact: {
+      nom: "Sophie Lemaire",
+      fonction: "Chargée d'affaires",
+      tel: "06 98 76 54 32",
+      email: "s.lemaire@gss-securite.fr",
+    } as Contact,
+  },
+};
+
+/* --- Section II — Moyens matériels ---------------------------------- */
+export const SECTION_II = {
+  num: "II",
+  titre: "Moyens matériels affectés spécifiquement au marché",
+  points: 20,
+  reponse:
+    "Chaque agent est doté d'un équipement individuel complet (tenue GSS identifiable, " +
+    "chaussures de sécurité, lampe, moyen de communication) et des EPI requis par les zones à " +
+    "régime restrictif (ZRR) identifiées au CCTP. La traçabilité des rondes et des incidents " +
+    "est assurée par l'outil de main courante électronique Track Force (horodatage, pointeaux, " +
+    "rapports automatisés transmis au client). Les moyens d'accès (badges, clés) sont gérés " +
+    "selon une procédure de perception et de restitution contrôlée.",
+};
+
+/* --- Section III — Organisation, management, qualité ---------------- */
+export const SECTION_III = {
+  num: "III",
+  titre: "Organisation interne, management, qualité",
+  blocs: [
+    {
+      titre: "Engagement qualité",
+      points: 10,
+      reponse:
+        "Le pilotage s'appuie sur un management de proximité et un plan de contrôle qualité : " +
+        "contrôles inopinés, audits périodiques et indicateurs partagés avec l'Université. La " +
+        "mise en place du marché suit un processus de démarrage formalisé (reprise du personnel, " +
+        "briefings, livre de consignes).",
+    },
+    {
+      titre: "Performance environnementale",
+      points: 10,
+      reponse:
+        "Véhicules à faibles émissions pour les rondes, dématérialisation des rapports via la " +
+        "main courante électronique, démarche RSE GSS (tri sélectif, sensibilisation des agents, " +
+        "optimisation des déplacements).",
+    },
+  ],
+};
+
+/* --- Section IV — Télésurveillance (lot 3) -------------------------- */
+export const SECTION_IV = {
+  num: "IV",
+  titre: "Télésurveillance et modalités d'intervention",
+  points: 40,
+  lotNote: "À remplir uniquement en cas de candidature et d'offre au lot 3.",
+  apsad: {
+    label: "Certification de service APSAD R 31",
+    options: [
+      { label: "P2", checked: false },
+      { label: "P3", checked: true },
+      { label: "P5", checked: false },
+    ] as OptionCochee[],
+  },
+  localisation: {
+    label: "Localisation de la station de télésurveillance",
+    reponse:
+      "Station de télésurveillance certifiée APSAD R31 (niveau P3) située à Rouen (76), opérée " +
+      "24h/24 et 7j/7.",
+  },
+  soustraitanceLeverDoute: {
+    label: "La prestation d'intervention (lever de doute) est-elle sous-traitée ?",
+    departements: [
+      { dep: "76", valeur: "Non — réalisée par les moyens propres GSS." },
+      { dep: "27", valeur: "Oui — partenaire agréé local sous convention APSAD." },
+    ],
+  },
+  reportAlarmes: {
+    label:
+      "Observations techniques sur le report des alarmes intrusions, technique ou incendie",
+    reponse:
+      "Report des alarmes intrusion, technique et incendie sur la station via transmetteur IP " +
+      "doublé d'un secours GSM. Levée de doute vidéo systématique avant tout déclenchement " +
+      "d'intervention physique.",
+  },
+  moyensOuverture: {
+    label: "Moyens d'ouverture des locaux pour la levée de doute",
+    reponse:
+      "Trousseaux sécurisés sous convention, badge d'accès dédié et coffre à clés normalisé " +
+      "déposé sur site permettant l'intervention en levée de doute à toute heure.",
+  },
+  delaisLabel:
+    "Délais contractuels maximums d'intervention en cas de déclenchement d'alarme pour parvenir sur chaque site",
+  intervenantsLabel:
+    "Nombre d'intervenants véhiculés disponibles les soirs de week-end et jours fériés à moins de 20 km",
+};
+
+export const DELAIS_INTERVENTION: { site: string; delai_minutes: number }[] = [
+  { site: "Campus Mont-Saint-Aignan", delai_minutes: 30 },
+  { site: "Campus Rouen-Pasteur", delai_minutes: 30 },
+  { site: "Campus du Madrillet (Saint-Étienne-du-Rouvray)", delai_minutes: 35 },
+  { site: "Campus Rouen-Martainville", delai_minutes: 40 },
+  { site: "Site d'Elbeuf", delai_minutes: 45 },
+  { site: "Campus d'Évreux (27)", delai_minutes: 45 },
+];
+
+export const NB_INTERVENANTS_WE_JF = 3;
