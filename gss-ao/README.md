@@ -124,11 +124,42 @@ Produit ~138 chunks (118 PDF, 21 catégories) dans un JSONL **iso-schéma
 pgvector**. En mode dry-run (`EMBEDDING_PROVIDER=none`), les embeddings ne sont
 pas calculés (idempotent : ré-ingérer ne crée pas de doublon).
 
-### API (squelette)
+### API (squelette + génération IA)
 
 ```bash
-uvicorn backend.main:app --reload   # seul /api/health est actif en itération 1
+uvicorn backend.main:app --reload   # /api/health + endpoints IA (Module C)
 ```
+
+### Génération IA du mémoire technique (Module C) — 2 serveurs
+
+L'écran « Mémoire technique » génère chaque section via OpenAI (GPT-4o-mini) et
+l'écran « Export » remplit le **template imposé** Univ Rouen. Il faut donc
+lancer **le backend (port 8000) ET le frontend (port 3000) en parallèle** :
+
+```bash
+# Terminal 1 — backend FastAPI (génération IA + remplissage DOCX)
+cd gss-ao
+source .venv/bin/activate
+uvicorn backend.main:app --port 8000 --reload
+
+# Terminal 2 — frontend Next.js
+cd gss-ao/frontend
+npm run dev        # http://localhost:3000
+```
+
+> En une ligne (zsh/bash), depuis `gss-ao/` :
+> ```bash
+> (cd "$PWD" && .venv/bin/uvicorn backend.main:app --port 8000 --reload) &
+> (cd frontend && npm run dev)
+> ```
+
+Puis : ouvrir **Paramètres** (`/parametres`) pour saisir la clé OpenAI
+(`sk-...`, stockée en `localStorage`, testée via `/api/test-key`), aller sur
+l'écran **Mémoire technique**, générer les sections, puis **Export → Exporter
+DOCX** (le backend renvoie le template rempli, éditable dans Word).
+
+> Base URL backend configurable côté frontend via `NEXT_PUBLIC_API_BASE`
+> (défaut `http://localhost:8000`). La clé OpenAI n'est jamais commitée.
 
 ### Infra (cible, nécessite Docker)
 

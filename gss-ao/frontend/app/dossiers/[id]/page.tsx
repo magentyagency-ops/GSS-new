@@ -20,6 +20,7 @@ import {
   Separator,
 } from "@/components/ui";
 import { DossierNav } from "@/components/dossier-nav";
+import { ModeSelector } from "@/components/ai/mode-selector";
 import {
   ROUEN,
   CRITERES,
@@ -211,6 +212,7 @@ export default function SynthesePage() {
 
         {/* Sidebar actions */}
         <aside className="space-y-4">
+          <ModeSelector id={ROUEN.id} templateDetected={true} />
           <Card>
             <CardHeader>
               <CardTitle className="text-sm">Actions rapides</CardTitle>

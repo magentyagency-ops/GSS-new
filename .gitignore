@@ -17,6 +17,9 @@ Cas-Univ-Rouen-MP2026-08/Annexes/
 
 # --- Confidentiel : base de connaissances interne GSS -------------------------
 # Dossier réel + lien symbolique présent à la racine du workspace.
+# Pattern large : couvre "SLIDE REP AO", le symlink, et tout duplicata
+# (ex. "SLIDE REP AO-2/") — données internes GSS, ne jamais versionner.
+SLIDE REP AO*
 SLIDE REP AO/
 SLIDE REP AO
 /SLIDE REP AO

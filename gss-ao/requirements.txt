@@ -35,6 +35,11 @@ python-multipart==0.0.12    # upload de fichiers (Module A)
 # --- LLM (wrapper, non appelé en itération 1) --------------------------------
 anthropic==0.37.1
 
+# --- Génération IA mémoire technique (Module C / écran 5) --------------------
+# OpenAI GPT-4o-mini (clé fournie par l'utilisateur, BYO-key). python-docx (déjà
+# présent ci-dessus) sert au remplissage du template imposé Univ Rouen.
+openai==1.109.1
+
 # --- Tests / qualité ---------------------------------------------------------
 pytest==8.3.3
 ruff==0.6.9

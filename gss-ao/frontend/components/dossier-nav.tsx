@@ -1,17 +1,29 @@
 "use client";
 
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { FileText, ListChecks, PenLine, Download } from "lucide-react";
+import { FileText, ListChecks, PenLine, Download, FileStack } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { getMode } from "@/lib/ai/mode";
 
-/** Onglets d'étapes au sein d'un dossier (écrans 3 → 6). */
+/** Onglets d'étapes au sein d'un dossier (écrans 3 → 6).
+ *  En Mode B (réponse libre), une étape « Sélection slides » s'intercale. */
 export function DossierNav({ id }: { id: string }) {
   const pathname = usePathname();
   const base = `/dossiers/${id}`;
+  const [modeB, setModeB] = useState(false);
+
+  useEffect(() => {
+    setModeB(getMode(id) === "B");
+  }, [id, pathname]);
+
   const steps = [
     { href: base, label: "Synthèse", icon: FileText },
     { href: `${base}/conformite`, label: "Conformité", icon: ListChecks },
+    ...(modeB
+      ? [{ href: `${base}/selection-slides`, label: "Sélection slides", icon: FileStack }]
+      : []),
     { href: `${base}/memoire`, label: "Mémoire technique", icon: PenLine },
     { href: `${base}/export`, label: "Export", icon: Download },
   ];
