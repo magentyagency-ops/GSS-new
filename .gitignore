@@ -52,3 +52,9 @@ npm-debug.log*
 gss-ao/data/output/
 gss-ao/data/*.jsonl
 *.local.json
+
+# Artefact de build TypeScript (régénéré)
+gss-ao/frontend/tsconfig.tsbuildinfo
+
+# Références externes (Alexandre/Clarence) — hors dépôt (contiennent des annexes RGPD)
+refs/

@@ -1,6 +1,6 @@
 "use client";
 
-import { CheckCircle2, AlertTriangle, FileType2, FileDown, Send } from "lucide-react";
+import { CheckCircle2, AlertTriangle, Send } from "lucide-react";
 import {
   Badge,
   Button,
@@ -17,6 +17,7 @@ import {
   TableRow,
 } from "@/components/ui";
 import { DossierNav } from "@/components/dossier-nav";
+import { ExportButtons } from "@/components/export/export-buttons";
 import {
   BlocContact,
   GroupeCases,
@@ -58,14 +59,7 @@ export default function ExportPage() {
           </div>
           <h1 className="text-xl font-semibold">Export & dépôt</h1>
         </div>
-        <div className="flex items-center gap-2">
-          <Button variant="outline">
-            <FileType2 className="h-4 w-4" /> Exporter DOCX
-          </Button>
-          <Button variant="outline">
-            <FileDown className="h-4 w-4" /> Exporter PDF
-          </Button>
-        </div>
+        <ExportButtons />
       </header>
 
       <DossierNav id={ROUEN.id} />
