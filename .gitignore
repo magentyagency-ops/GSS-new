@@ -64,3 +64,6 @@ gss-ao/frontend/tsconfig.tsbuildinfo
 
 # Références externes (Alexandre/Clarence) — hors dépôt (contiennent des annexes RGPD)
 refs/
+
+# Démo locale (graine localStorage) — ne pas committer
+gss-ao/frontend/public/_seed_demo.html
