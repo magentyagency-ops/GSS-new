@@ -56,6 +56,9 @@ gss-ao/data/output/
 gss-ao/data/*.jsonl
 *.local.json
 
+# Index RAG local (contient le texte des slides GSS — confidentiel)
+gss-ao/data/rag/
+
 # Artefact de build TypeScript (régénéré)
 gss-ao/frontend/tsconfig.tsbuildinfo
 
