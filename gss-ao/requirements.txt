@@ -40,6 +40,12 @@ anthropic==0.37.1
 # présent ci-dessus) sert au remplissage du template imposé Univ Rouen.
 openai==1.109.1
 
+# --- RAG réel (embeddings + recherche vectorielle locale) -------------------
+# sqlite-vec : index vectoriel dans un fichier .db (zéro infra, RGPD local).
+# numpy : utilitaires vecteurs / fallback similarité.
+sqlite-vec==0.1.9
+numpy==2.1.2
+
 # --- Tests / qualité ---------------------------------------------------------
 pytest==8.3.3
 ruff==0.6.9

@@ -120,11 +120,92 @@ class PgVectorStore(VectorStore):
             return int(conn.execute(select(func.count()).select_from(table)).scalar_one())
 
 
+class SqliteVecStore(VectorStore):
+    """RAG réel local : sqlite + extension sqlite-vec (table virtuelle vec0).
+
+    Schéma : `dossier` est une colonne métadonnée FILTRABLE (retrieval hybride) ;
+    `fichier`, `page`, `texte` sont des colonnes auxiliaires (+) renvoyées avec le
+    résultat. La recherche KNN renvoie aussi la distance (cosine via vec0).
+    """
+
+    def __init__(self, db_path: Path, dim: int) -> None:
+        import sqlite3
+
+        import sqlite_vec
+
+        self.db_path = Path(db_path)
+        self.dim = dim
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self.conn = sqlite3.connect(str(self.db_path))
+        self.conn.enable_load_extension(True)
+        sqlite_vec.load(self.conn)
+        self.conn.enable_load_extension(False)
+        self._serialize = sqlite_vec.serialize_float32
+        self.conn.execute(
+            f"CREATE VIRTUAL TABLE IF NOT EXISTS vec_chunks USING vec0("
+            f"chunk_id TEXT PRIMARY KEY, dossier TEXT, "
+            f"+fichier TEXT, +page INTEGER, +texte TEXT, embedding float[{dim}])"
+        )
+        self.conn.commit()
+
+    def reset(self) -> None:
+        """Vide l'index (réindexation propre)."""
+        self.conn.execute("DROP TABLE IF EXISTS vec_chunks")
+        self.conn.execute(
+            f"CREATE VIRTUAL TABLE vec_chunks USING vec0("
+            f"chunk_id TEXT PRIMARY KEY, dossier TEXT, "
+            f"+fichier TEXT, +page INTEGER, +texte TEXT, embedding float[{self.dim}])"
+        )
+        self.conn.commit()
+
+    def upsert(self, chunks: list[Chunk]) -> int:
+        n = 0
+        for c in chunks:
+            if c.embedding is None:
+                continue
+            m = c.metadata
+            self.conn.execute("DELETE FROM vec_chunks WHERE chunk_id = ?", (c.chunk_id,))
+            self.conn.execute(
+                "INSERT INTO vec_chunks(chunk_id, dossier, fichier, page, texte, embedding) "
+                "VALUES (?,?,?,?,?,?)",
+                (c.chunk_id, m.categorie, m.source_file, m.page or 0, c.text,
+                 self._serialize(c.embedding)),
+            )
+            n += 1
+        self.conn.commit()
+        return n
+
+    def count(self) -> int:
+        return int(self.conn.execute("SELECT count(*) FROM vec_chunks").fetchone()[0])
+
+    def search_hybrid(
+        self, embedding: list[float], *, top_k: int = 5, dossier: str | None = None
+    ) -> list[dict]:
+        """KNN vectoriel + filtre thématique optionnel. Retourne des dicts sourcés."""
+        params: list = [self._serialize(embedding), top_k]
+        where = "embedding MATCH ? AND k = ?"
+        if dossier:
+            where += " AND dossier = ?"
+            params.append(dossier)
+        rows = self.conn.execute(
+            f"SELECT chunk_id, dossier, fichier, page, texte, distance "
+            f"FROM vec_chunks WHERE {where} ORDER BY distance",
+            params,
+        ).fetchall()
+        return [
+            {"chunk_id": r[0], "dossier": r[1], "fichier": r[2], "page": r[3],
+             "texte": r[4], "distance": r[5]}
+            for r in rows
+        ]
+
+
 def get_vector_store(settings: Settings | None = None) -> VectorStore:
-    """Fabrique le VectorStore selon `VECTOR_STORE` (jsonl par défaut)."""
+    """Fabrique le VectorStore selon `VECTOR_STORE`."""
     settings = settings or get_settings()
     if settings.vector_store is VectorStoreBackend.JSONL:
         return JsonlVectorStore(settings.vector_store_jsonl_path)
+    if settings.vector_store is VectorStoreBackend.SQLITE_VEC:
+        return SqliteVecStore(settings.rag_db_path, settings.embedding_dim)
     if settings.vector_store is VectorStoreBackend.PGVECTOR:
         return PgVectorStore(settings.database_url)
     raise ValueError(f"Backend vector store inconnu : {settings.vector_store}")

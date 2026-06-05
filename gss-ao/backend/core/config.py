@@ -22,6 +22,7 @@ class EmbeddingProvider(str, Enum):
 
 class VectorStoreBackend(str, Enum):
     JSONL = "jsonl"  # fallback local sans Docker
+    SQLITE_VEC = "sqlite_vec"  # RAG réel local (fichier .db)
     PGVECTOR = "pgvector"
 
 
@@ -44,17 +45,19 @@ class Settings(BaseSettings):
     ocr_lang: str = "fra"
 
     # --- Embeddings ---------------------------------------------------------
-    embedding_provider: EmbeddingProvider = EmbeddingProvider.NONE
-    embedding_model: str = "voyage-3"
-    embedding_dim: int = 1024
+    # RAG réel : OpenAI text-embedding-3-small (1536 dims).
+    embedding_provider: EmbeddingProvider = EmbeddingProvider.OPENAI
+    embedding_model: str = "text-embedding-3-small"
+    embedding_dim: int = 1536
     voyage_api_key: str = ""
     openai_api_key: str = ""
 
     # --- Vector store -------------------------------------------------------
-    vector_store: VectorStoreBackend = VectorStoreBackend.JSONL
+    vector_store: VectorStoreBackend = VectorStoreBackend.SQLITE_VEC
     vector_store_jsonl_path: Path = Field(
         default=Path("data/output/slide_rep_ao_chunks.jsonl")
     )
+    rag_db_path: Path = Field(default=Path("data/rag/slide_rep_ao.db"))
     database_url: str = "postgresql+psycopg://gss:gss@localhost:5432/gss_ao"
 
     # --- LLM (non appelé en itération 1) -----------------------------------

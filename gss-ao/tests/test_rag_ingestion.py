@@ -87,6 +87,57 @@ def test_factory_returns_jsonl_by_default(tmp_path):
     assert isinstance(get_vector_store(s), JsonlVectorStore)
 
 
+def test_factory_returns_sqlite_vec(tmp_path):
+    s = Settings(
+        _env_file=None,
+        vector_store=VectorStoreBackend.SQLITE_VEC,
+        rag_db_path=tmp_path / "test.db",
+        embedding_dim=3,
+    )
+    from backend.rag.vector_store import SqliteVecStore
+    store = get_vector_store(s)
+    assert isinstance(store, SqliteVecStore)
+
+
+def test_sqlite_vec_store_upsert_and_search(tmp_path):
+    from backend.rag.vector_store import SqliteVecStore
+    db_path = tmp_path / "test.db"
+    store = SqliteVecStore(db_path, dim=3)
+    
+    # Check initial count
+    assert store.count() == 0
+    
+    # Create chunks with embeddings
+    c1 = _chunk("chunk_1", 1)
+    c1.embedding = [1.0, 0.0, 0.0]
+    
+    c2 = _chunk("chunk_2", 2)
+    c2.embedding = [0.0, 1.0, 0.0]
+    
+    # Upsert
+    store.upsert([c1, c2])
+    assert store.count() == 2
+    
+    # Search
+    results = store.search_hybrid([1.0, 0.0, 0.0], top_k=1)
+    assert len(results) == 1
+    assert results[0]["chunk_id"] == "chunk_1"
+    
+    # Search with category filter
+    results = store.search_hybrid([0.0, 1.0, 0.0], top_k=1, dossier="PROCEDURE")
+    assert len(results) == 1
+    assert results[0]["chunk_id"] == "chunk_2"
+    
+    # Search with non-matching filter
+    results = store.search_hybrid([0.0, 1.0, 0.0], top_k=1, dossier="NON_EXISTENT")
+    assert len(results) == 0
+
+    # Reset
+    store.reset()
+    assert store.count() == 0
+
+
+
 # --- iso-schéma JSONL <-> pgvector (sans base) -------------------------------
 
 def test_pgvector_row_matches_table_columns():
@@ -112,6 +163,17 @@ def test_get_embedder_other_provider_raises():
     s = Settings(_env_file=None, embedding_provider="voyage")
     with pytest.raises(NotImplementedError):
         get_embedder(s)
+
+
+def test_openai_embedder_initialization():
+    from backend.rag.embeddings import OpenAIEmbedder
+    with pytest.raises(ValueError, match="Clé API OpenAI requise"):
+        OpenAIEmbedder(api_key="")
+
+    emb = OpenAIEmbedder(api_key="test-key", model="text-embedding-3-small", dim=1536)
+    assert emb.model == "text-embedding-3-small"
+    assert emb.dim == 1536
+
 
 
 # --- intégration corpus ------------------------------------------------------
