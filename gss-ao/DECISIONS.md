@@ -137,3 +137,51 @@ pas de PDF hors catégorie, pas de doublon de nom).
   scans → OCR non nécessaire en cas général, fallback OCR optionnel par page.
 - Mémoires techniques **historiques GSS** (brief §13.1) non fournis → le RAG
   n'indexe que `SLIDE REP AO/` à ce stade.
+
+---
+
+## D6 — RAG réel : sqlite-vec local + OpenAI embeddings  ✅
+
+- **Vector store : sqlite-vec** (fichier `.db` local) plutôt que Supabase
+  pgvector. Justification : outil **interne**, petit corpus (~118 chunks),
+  **sans Docker**, et surtout **RGPD** — le texte des slides GSS ne quitte pas la
+  machine (Supabase, même région EU Frankfurt, aurait envoyé du contenu interne
+  au cloud sans bénéfice à cette échelle). Abstraction `VectorStore` conservée →
+  migration pgvector triviale si multi-utilisateur un jour. Extension sqlite
+  chargeable vérifiée (`enable_load_extension=True`, CPython uv).
+- **Embeddings** : OpenAI `text-embedding-3-small` (1536 dims), appels par lots.
+- **Chunking** : ~500 tokens (≈2000 car.), overlap ~50, par page/paragraphe.
+- **PDF pauvres** (<30 mots, 10 fichiers, surtout logos PARTENAIRES) : description
+  **GPT-4o vision** (rasterisation PyMuPDF) ajoutée au chunk.
+- **Retrieval hybride** : filtre thématique (`dossier`) + KNN cosinus (vec0).
+- **Citations** : prompt impose `(source: DOSSIER/fichier.pdf)` ; validation
+  backend post-génération → champ `citation_warnings` (sources introuvables
+  **signalées sans modifier** le texte ; cf. arbitrage). Fallback transparent sur
+  contexte mock si l'index est absent → **zéro régression**, 2 modes préservés.
+- **Coût indexation** : embeddings ≈ $0.0004 + ~10 images vision ≈ **< $0.05**
+  (budget $10 largement respecté).
+- **Fix** : DOCX Mode B en **`xml:lang="fr-FR"`** (Word ne le détecte plus en-US).
+
+### Tests E2E comparatifs (mock vs RAG)
+
+Harnais : `scripts/rag_eval.py` (3 sections : `i_qualifications`, `ii_rondes`,
+`iv_report_alarmes`). Métriques : longueur, nb citations, **citations valides**
+(source réellement présente) vs **citations fausses** (hallucination de source).
+
+**Exécution** (nécessite l'index + une clé OpenAI — budget tuteur) :
+```bash
+python -m backend.rag.indexer          # indexe le corpus (~$0.05)
+python -m scripts.rag_eval             # tableau comparatif + data/output/rag_eval.json
+```
+
+| Section | Mots (mock/RAG) | Citations valides (RAG) | Citations fausses |
+|---|---|---|---|
+| i_qualifications | _à exécuter_ | _à exécuter_ | _à exécuter_ |
+| ii_rondes | _à exécuter_ | _à exécuter_ | _à exécuter_ |
+| iv_report_alarmes | _à exécuter_ | _à exécuter_ | _à exécuter_ |
+
+> Résultats numériques à compléter après le run indexé (non exécuté ici faute de
+> clé OpenAI dans l'environnement de dev). Attendu : en mode RAG, présence de
+> citations vers de **vraies** slides (`citations_unknown` ≈ 0 grâce à la
+> validation), contre 0 source traçable en mock. Le validateur garantit qu'aucune
+> citation fausse ne passe inaperçue (signalée dans `citation_warnings`).
