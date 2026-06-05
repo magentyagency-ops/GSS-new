@@ -217,3 +217,40 @@ export const TableCell = ({
 }: React.TdHTMLAttributes<HTMLTableCellElement>) => (
   <td className={cn("px-3 py-2.5 align-middle", className)} {...props} />
 );
+
+/* ----------------------------------------------------------------- Dialog */
+/** Modale légère (overlay + carte centrée). Fermeture par clic hors-zone. */
+export function Dialog({
+  open,
+  onClose,
+  title,
+  children,
+}: {
+  open: boolean;
+  onClose: () => void;
+  title?: React.ReactNode;
+  children: React.ReactNode;
+}) {
+  if (!open) return null;
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-foreground/30 p-4"
+      onClick={onClose}
+    >
+      <div
+        className="max-h-[80vh] w-full max-w-lg overflow-y-auto rounded-lg border border-border bg-card p-5 shadow-xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        {title && (
+          <div className="mb-3 flex items-center justify-between gap-2">
+            <h3 className="text-sm font-semibold">{title}</h3>
+            <button onClick={onClose} className="text-muted-foreground hover:text-foreground">
+              ✕
+            </button>
+          </div>
+        )}
+        {children}
+      </div>
+    </div>
+  );
+}

@@ -35,8 +35,8 @@ def test_rag_context_fallback_without_index(tmp_path, monkeypatch):
     from backend.ai import routes_ai
 
     monkeypatch.setattr(routes_ai.retrieval, "index_exists", lambda *a, **k: False)
-    chunks, citations, used = routes_ai._rag_context("ma requête", "sk-test")
-    assert chunks == [] and citations == set() and used is False
+    chunks, citations, used, sources = routes_ai._rag_context("ma requête", "sk-test")
+    assert chunks == [] and citations == set() and used is False and sources == []
 
 
 def test_rag_search_endpoint_409_without_index(tmp_path, monkeypatch):

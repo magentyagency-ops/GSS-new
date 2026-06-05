@@ -52,10 +52,35 @@ export interface RagChunk {
   texte: string;
 }
 
+export interface RagSource {
+  dossier: string;
+  fichier: string;
+  page: number | null;
+  citation: string;
+  texte: string;
+}
+
 export interface GenerateResult {
   generated_text: string;
   model: string;
   tokens_used: number;
+  rag_used: boolean;
+  sources: RagSource[];
+  citation_warnings: string[];
+}
+
+export interface RagStatus {
+  ready: boolean;
+  chunks_count: number;
+  last_indexed_at: string | null;
+  embedder: string;
+  store: string;
+}
+
+export async function getRagStatus(): Promise<RagStatus> {
+  const res = await fetch(`${API_BASE}/api/rag/status`);
+  if (!res.ok) throw new Error(`Statut RAG indisponible (${res.status})`);
+  return res.json() as Promise<RagStatus>;
 }
 
 export async function testKey(apiKey: string): Promise<boolean> {

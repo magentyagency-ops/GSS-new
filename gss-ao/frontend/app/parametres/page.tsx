@@ -1,9 +1,18 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Key, Eye, EyeOff, CheckCircle2, XCircle, Loader2, ShieldQuestion } from "lucide-react";
+import {
+  Key,
+  Eye,
+  EyeOff,
+  CheckCircle2,
+  XCircle,
+  Loader2,
+  ShieldQuestion,
+  Database,
+} from "lucide-react";
 import { Badge, Button, Card, CardContent, CardHeader, CardTitle } from "@/components/ui";
-import { getApiKey, setApiKey, testKey } from "@/lib/ai/client";
+import { getApiKey, setApiKey, testKey, getRagStatus, type RagStatus } from "@/lib/ai/client";
 
 type Status = "unknown" | "valid" | "invalid" | "empty";
 
@@ -14,10 +23,13 @@ export default function ParametresPage() {
   const [testing, setTesting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const [rag, setRag] = useState<RagStatus | null>(null);
+
   useEffect(() => {
     const k = getApiKey();
     setKey(k);
     setStatus(k ? "unknown" : "empty");
+    getRagStatus().then(setRag).catch(() => setRag(null));
   }, []);
 
   function onChange(v: string) {
@@ -112,6 +124,51 @@ export default function ParametresPage() {
                 Le test appelle <code>GET /v1/models</code> via le backend (
                 <code>/api/test-key</code>). Assurez-vous que le backend tourne sur le port 8000.
               </div>
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2 text-base">
+                <Database className="h-4 w-4 text-primary" /> Index RAG (SLIDE REP AO)
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              <div className="flex items-center gap-2 text-sm">
+                <span className="text-muted-foreground">Statut :</span>
+                {rag?.ready ? (
+                  <Badge variant="success">Index prêt</Badge>
+                ) : (
+                  <Badge variant="secondary">Non construit (mode mock)</Badge>
+                )}
+              </div>
+              <div className="grid grid-cols-2 gap-3 text-sm">
+                <div>
+                  <div className="text-xs text-muted-foreground">Chunks indexés</div>
+                  <div className="font-medium">{rag?.chunks_count ?? "—"}</div>
+                </div>
+                <div>
+                  <div className="text-xs text-muted-foreground">Dernière indexation</div>
+                  <div className="font-medium">
+                    {rag?.last_indexed_at
+                      ? new Date(rag.last_indexed_at).toLocaleString("fr-FR")
+                      : "—"}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-xs text-muted-foreground">Embeddings</div>
+                  <div className="font-medium">{rag?.embedder ?? "—"}</div>
+                </div>
+                <div>
+                  <div className="text-xs text-muted-foreground">Store</div>
+                  <div className="font-medium">{rag?.store ?? "—"}</div>
+                </div>
+              </div>
+              {!rag?.ready && (
+                <div className="rounded-md bg-muted/40 p-3 text-xs text-muted-foreground">
+                  Construire l'index : <code>python -m backend.rag.indexer</code> (backend).
+                </div>
+              )}
             </CardContent>
           </Card>
         </div>

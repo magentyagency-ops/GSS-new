@@ -13,13 +13,22 @@ import {
   Loader2,
   Cpu,
   FileStack,
+  Database,
+  FlaskConical,
 } from "lucide-react";
-import { Badge, Button, Card, Progress } from "@/components/ui";
+import { Badge, Button, Card, Dialog, Progress } from "@/components/ui";
 import { DossierNav } from "@/components/dossier-nav";
 import { ROUEN } from "@/lib/mock-data";
 import { AI_SECTIONS, CHAPTER_TITLES } from "@/lib/ai/sections";
 import { AI_SECTIONS_B, CHAPTER_TITLES_B } from "@/lib/ai/sections-b";
-import { generateSection, getApiKey, type RagChunk } from "@/lib/ai/client";
+import {
+  generateSection,
+  getApiKey,
+  getRagStatus,
+  type RagChunk,
+  type RagSource,
+  type RagStatus,
+} from "@/lib/ai/client";
 import {
   getMode,
   memoireBKey,
@@ -33,6 +42,9 @@ interface GenEntry {
   text: string;
   model: string;
   tokens: number;
+  ragUsed?: boolean;
+  sources?: RagSource[];
+  citationWarnings?: string[];
 }
 type GenMap = Record<string, GenEntry>;
 
@@ -56,6 +68,8 @@ export default function MemoirePage() {
   const [error, setError] = useState<string | null>(null);
   const [hasKey, setHasKey] = useState(true);
   const [slidesByChapter, setSlidesByChapter] = useState<Record<string, RagChunk[]>>({});
+  const [ragStatus, setRagStatus] = useState<RagStatus | null>(null);
+  const [dialogSource, setDialogSource] = useState<RagSource | null>(null);
 
   const storageKey = mode === "B" ? memoireBKey(ROUEN.id) : `gss_memoire_${ROUEN.id}`;
 
@@ -111,6 +125,9 @@ export default function MemoirePage() {
       /* ignore */
     }
     setActiveId(m === "B" ? AI_SECTIONS_B[0].id : AI_SECTIONS[0].id);
+
+    // Statut RAG (badge RAG actif / Mock) — best-effort
+    getRagStatus().then(setRagStatus).catch(() => setRagStatus(null));
   }, []);
 
   function persist(next: GenMap) {
@@ -144,7 +161,17 @@ export default function MemoirePage() {
         mode,
         selectedSlides: mode === "B" ? section.ragChunks : [],
       });
-      persist({ ...gen, [section.id]: { text: r.generated_text, model: r.model, tokens: r.tokens_used } });
+      persist({
+        ...gen,
+        [section.id]: {
+          text: r.generated_text,
+          model: r.model,
+          tokens: r.tokens_used,
+          ragUsed: r.rag_used,
+          sources: r.sources,
+          citationWarnings: r.citation_warnings,
+        },
+      });
     } catch (e) {
       setError(e instanceof Error ? e.message : "Génération échouée");
     } finally {
@@ -178,6 +205,21 @@ export default function MemoirePage() {
             </h1>
           </div>
           <div className="flex items-center gap-4">
+            {ragStatus?.ready ? (
+              <span
+                className="inline-flex items-center gap-1 rounded-md bg-success/10 px-2 py-0.5 text-xs font-medium text-success"
+                title={`${ragStatus.chunks_count} chunks · ${ragStatus.embedder}`}
+              >
+                <Database className="h-3 w-3" /> RAG actif
+              </span>
+            ) : (
+              <span
+                className="inline-flex items-center gap-1 rounded-md bg-secondary px-2 py-0.5 text-xs font-medium text-muted-foreground"
+                title="Index RAG non construit — contexte mock. Lancez backend.rag.indexer."
+              >
+                <FlaskConical className="h-3 w-3" /> Mock
+              </span>
+            )}
             <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
               <Cpu className="h-3.5 w-3.5" /> {totalTokens.toLocaleString("fr-FR")} tokens
             </div>
@@ -219,9 +261,11 @@ export default function MemoirePage() {
                 </div>
                 <div className="space-y-0.5">
                   {chapSections.map((s) => {
-                    const done = !!gen[s.id]?.text;
+                    const entry = gen[s.id];
+                    const done = !!entry?.text;
                     const isActive = s.id === activeId;
                     const isBusy = busyId === s.id;
+                    const warns = entry?.citationWarnings?.length || 0;
                     return (
                       <button
                         key={s.id}
@@ -239,6 +283,12 @@ export default function MemoirePage() {
                           <Circle className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
                         )}
                         <span className="flex-1">{s.title}</span>
+                        {warns > 0 && (
+                          <AlertTriangle
+                            className="mt-0.5 h-3.5 w-3.5 shrink-0 text-warning"
+                            aria-label={`${warns} citation(s) à vérifier`}
+                          />
+                        )}
                       </button>
                     );
                   })}
@@ -312,6 +362,20 @@ export default function MemoirePage() {
                     <Cpu className="h-3.5 w-3.5" /> {current.model}
                   </span>
                   <span>{current.tokens.toLocaleString("fr-FR")} tokens</span>
+                  {current.ragUsed && (
+                    <span className="inline-flex items-center gap-1 text-success">
+                      <Database className="h-3.5 w-3.5" /> RAG
+                    </span>
+                  )}
+                  {!!current.citationWarnings?.length && (
+                    <span
+                      className="inline-flex items-center gap-1 rounded-md bg-warning/10 px-2 py-0.5 font-medium text-warning"
+                      title={`Sources introuvables : ${current.citationWarnings.join(", ")}`}
+                    >
+                      <AlertTriangle className="h-3.5 w-3.5" />
+                      {current.citationWarnings.length} citation(s) à vérifier
+                    </span>
+                  )}
                 </div>
                 <Button
                   variant="outline"
@@ -333,7 +397,43 @@ export default function MemoirePage() {
 
         {/* Sources */}
         <aside className="overflow-y-auto border-l border-border bg-card p-4">
-          {mode === "B" ? (
+          {current?.sources?.length ? (
+            <>
+              <div className="mb-3 flex items-center gap-2">
+                <BookOpen className="h-4 w-4 text-primary" />
+                <span className="text-sm font-semibold">Sources citées</span>
+                <span className="ml-auto text-xs text-muted-foreground">
+                  {current.sources.length}
+                </span>
+              </div>
+              <p className="mb-2 text-xs text-muted-foreground">
+                Cliquez une source pour voir l'extrait exact utilisé.
+              </p>
+              <div className="space-y-2">
+                {(current.sources ?? []).map((src, i) => (
+                  <button
+                    key={i}
+                    onClick={() => setDialogSource(src)}
+                    className="block w-full text-left"
+                  >
+                    <Card className="p-3 transition-colors hover:border-primary">
+                      <div className="mb-1 flex items-center justify-between gap-2">
+                        <Badge variant="secondary" className="font-normal">
+                          {src.dossier}
+                        </Badge>
+                        {src.page != null && (
+                          <span className="text-[10px] text-muted-foreground">p. {src.page}</span>
+                        )}
+                      </div>
+                      <div className="truncate text-xs font-medium" title={src.fichier}>
+                        {src.fichier}
+                      </div>
+                    </Card>
+                  </button>
+                ))}
+              </div>
+            </>
+          ) : mode === "B" ? (
             <>
               <div className="mb-3 flex items-center gap-2">
                 <FileStack className="h-4 w-4 text-primary" />
@@ -395,6 +495,32 @@ export default function MemoirePage() {
           )}
         </aside>
       </div>
+
+      {/* Aperçu du chunk source exact (extrait du PDF utilisé par l'IA) */}
+      <Dialog
+        open={dialogSource !== null}
+        onClose={() => setDialogSource(null)}
+        title={dialogSource ? `${dialogSource.dossier} — ${dialogSource.fichier}` : ""}
+      >
+        {dialogSource && (
+          <div className="space-y-2">
+            <div className="flex items-center gap-2">
+              <Badge variant="secondary" className="font-normal">
+                {dialogSource.dossier}
+              </Badge>
+              {dialogSource.page != null && (
+                <span className="text-xs text-muted-foreground">page {dialogSource.page}</span>
+              )}
+            </div>
+            <div className="rounded-md bg-muted/40 p-3 text-sm leading-6 text-foreground/90">
+              {dialogSource.texte || "(extrait indisponible)"}
+            </div>
+            <p className="text-[11px] text-muted-foreground">
+              Citation : <code>(source: {dialogSource.citation})</code>
+            </p>
+          </div>
+        )}
+      </Dialog>
     </div>
   );
 }
