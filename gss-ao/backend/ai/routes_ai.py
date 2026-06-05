@@ -6,6 +6,8 @@ La clé OpenAI est fournie par requête (BYO-key).
 
 from __future__ import annotations
 
+import re
+
 from fastapi import APIRouter, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
@@ -17,6 +19,35 @@ from backend.ai.memoire_filler_b import build_memoire_b
 from backend.ai.sections import SECTIONS, SECTIONS_BY_ID
 from backend.ai.sections_b import SECTIONS_B
 from backend.ai.slide_selector import analyze_slides
+from backend.rag import retrieval
+
+# Citation au format (source: DOSSIER/fichier.pdf)
+_CITATION_RE = re.compile(r"\(source\s*:\s*([^)]+?\.pdf)\)", re.IGNORECASE)
+
+
+def _rag_context(query: str, api_key: str, *, top_k: int = 5):
+    """Récupère des extraits RAG sourcés pour `query`.
+
+    Retourne (context_chunks, citations_disponibles, rag_used). Si l'index
+    n'existe pas ou en cas d'erreur, retourne ([], set(), False) → fallback.
+    """
+    try:
+        if not retrieval.index_exists():
+            return [], set(), False
+        hits = retrieval.search(query, top_k=top_k, api_key=api_key)
+        chunks = [{"categorie": h.dossier, "source": h.citation(), "texte": h.texte} for h in hits]
+        citations = {h.citation().lower() for h in hits}
+        return chunks, citations, True
+    except Exception:  # noqa: BLE001 - le RAG est best-effort, jamais bloquant
+        return [], set(), False
+
+
+def _validate_citations(text: str, available: set[str]) -> list[str]:
+    """Retourne les citations présentes dans le texte mais ABSENTES des sources
+    réellement fournies (signalées sans modifier le texte)."""
+    cited = {m.strip().lower() for m in _CITATION_RE.findall(text)}
+    return sorted(c for c in cited if c not in available)
+
 
 router = APIRouter(prefix="/api", tags=["ai"])
 
@@ -44,6 +75,16 @@ class GenerateSectionResponse(BaseModel):
     generated_text: str
     model: str
     tokens_used: int
+    rag_used: bool = False
+    sources: list[str] = Field(default_factory=list)
+    citation_warnings: list[str] = Field(default_factory=list)
+
+
+class RagSearchRequest(BaseModel):
+    query: str
+    filtre_thematique: str | None = None
+    top_k: int = 5
+    api_key: str | None = None  # sinon clé serveur (.env)
 
 
 class TestKeyRequest(BaseModel):
@@ -101,11 +142,21 @@ def generate_section(req: GenerateSectionRequest) -> JSONResponse:
     target = spec.target if spec else "150-300"
     points = spec.points if spec else 10
 
+    # --- RAG réel : récupère des extraits sourcés pour l'intitulé de la section ---
+    query = req.template_question or (spec.question if spec else req.section_id)
+    rag_chunks, citations_available, rag_used = _rag_context(query, req.api_key)
+
     if req.mode == "B":
+        # Mode B : contexte = RAG si dispo, sinon slides sélectionnées (frontend)
+        slides = rag_chunks or [s.model_dump() for s in req.selected_slides]
+        if not rag_used:
+            citations_available = {
+                (s.get("source") or "").lower() for s in slides if s.get("source")
+            }
         user = prompts.build_user_prompt_mode_b(
             section_name=req.template_question or req.section_id,
             cctp_extract=req.cctp_extract,
-            selected_slides=[s.model_dump() for s in req.selected_slides],
+            selected_slides=slides,
             target_words=target,
         )
     else:
@@ -115,10 +166,16 @@ def generate_section(req: GenerateSectionRequest) -> JSONResponse:
                 {"error": f"section_id inconnu et template_question absent : {req.section_id}"},
                 status_code=400,
             )
+        # Mode A : contexte = RAG si dispo, sinon chunks mock fournis par le frontend
+        chunks = rag_chunks or [c.model_dump() for c in req.rag_chunks]
+        if not rag_used:
+            citations_available = {
+                (c.get("source") or "").lower() for c in chunks if c.get("source")
+            }
         user = prompts.build_user_prompt_mode_a(
             template_question=question,
             cctp_extract=req.cctp_extract,
-            rag_chunks=[c.model_dump() for c in req.rag_chunks],
+            rag_chunks=chunks,
             target_words=target,
             points=points,
         )
@@ -128,11 +185,17 @@ def generate_section(req: GenerateSectionRequest) -> JSONResponse:
     except ai_client.AIError as exc:
         return JSONResponse({"error": str(exc)}, status_code=exc.status_code)
 
+    # Validation des citations : signale celles introuvables (sans modifier le texte)
+    unknown = _validate_citations(completion.text, citations_available)
+
     return JSONResponse(
         {
             "generated_text": completion.text,
             "model": completion.model,
             "tokens_used": completion.tokens_used,
+            "rag_used": rag_used,
+            "sources": sorted(citations_available),
+            "citation_warnings": unknown,
         }
     )
 
@@ -141,6 +204,28 @@ def generate_section(req: GenerateSectionRequest) -> JSONResponse:
 def list_sections_b() -> list[dict]:
     """Catalogue des sections génériques Mode B (réponse libre)."""
     return [{"id": s.id, "chapter": s.chapter, "title": s.title} for s in SECTIONS_B]
+
+
+@router.post("/rag/search")
+def rag_search(req: RagSearchRequest) -> JSONResponse:
+    """Recherche RAG hybride : filtre thématique optionnel + similarité vectorielle."""
+    if not retrieval.index_exists():
+        return JSONResponse(
+            {"error": "Index RAG absent. Lancez : python -m backend.rag.indexer"},
+            status_code=409,
+        )
+    try:
+        hits = retrieval.search(
+            req.query,
+            filtre_thematique=req.filtre_thematique,
+            top_k=req.top_k,
+            api_key=req.api_key,
+        )
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    except ai_client.AIError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=exc.status_code)
+    return JSONResponse({"results": [h.as_dict() for h in hits], "count": len(hits)})
 
 
 @router.post("/analyze-slides")

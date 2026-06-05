@@ -13,6 +13,7 @@ import io
 
 from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.oxml.ns import qn
 from docx.shared import Pt, RGBColor
 
 from backend.ai.sections_b import CHAPITRES_B, SECTIONS_B
@@ -35,6 +36,10 @@ def build_memoire_b(
     doc = Document()
     doc.styles["Normal"].font.name = "Helvetica"
     doc.styles["Normal"].font.size = Pt(10)
+    # Langue du document = français (sinon Word détecte en-US par défaut).
+    _rpr = doc.styles["Normal"].element.get_or_add_rPr()
+    _lang = _rpr.makeelement(qn("w:lang"), {qn("w:val"): "fr-FR"})
+    _rpr.append(_lang)
 
     # --- Page de titre ---
     t = doc.add_paragraph()

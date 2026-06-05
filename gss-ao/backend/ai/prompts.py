@@ -25,6 +25,16 @@ def _format_chunks(rag_chunks: list[dict]) -> str:
     return "\n".join(lines)
 
 
+# Instruction de citation (RAG réel) : ajoutée quand des extraits sourcés sont
+# fournis. Format strict pour permettre la validation post-génération.
+CITATION_INSTRUCTION = (
+    "CITATIONS : appuie-toi uniquement sur les extraits fournis ci-dessus. "
+    "Après chaque affirmation qui en dépend, cite la source entre parenthèses "
+    "au format exact (source: DOSSIER/fichier.pdf), en réutilisant les noms de "
+    "fichiers fournis. N'invente jamais de source."
+)
+
+
 def build_user_prompt_mode_a(
     *,
     template_question: str,
@@ -34,13 +44,15 @@ def build_user_prompt_mode_a(
     points: int,
 ) -> str:
     """Prompt utilisateur pour une section en MODE A (question imposée)."""
+    cite = f"\n{CITATION_INSTRUCTION}\n" if rag_chunks else ""
     return (
         f"QUESTION IMPOSÉE PAR L'ACHETEUR (à laquelle répondre directement) :\n"
         f"{template_question}\n\n"
         f"EXTRAIT DU CCTP (exigences techniques du marché) :\n"
         f"{cctp_extract.strip() or '(non fourni)'}\n\n"
         f"CONTENUS RÉUTILISABLES DE LA BASE GSS (SLIDE REP AO) :\n"
-        f"{_format_chunks(rag_chunks)}\n\n"
+        f"{_format_chunks(rag_chunks)}\n"
+        f"{cite}\n"
         f"CONSIGNES DE FORMAT :\n"
         f"- Réponds uniquement à la question imposée ci-dessus.\n"
         f"- Longueur cible : {target_words} mots (critère noté sur {points} points).\n"
@@ -57,11 +69,13 @@ def build_user_prompt_mode_b(
     target_words: str,
 ) -> str:
     """Prompt utilisateur pour une section en MODE B (réponse libre, slides GSS)."""
+    cite = f"\n{CITATION_INSTRUCTION}\n" if selected_slides else ""
     return (
         f"Rédige la section « {section_name} » du mémoire technique GSS pour ce marché, "
         f"en t'appuyant sur les slides GSS sélectionnées ci-dessous. Style professionnel, "
         f"voix de GSS, personnalisé au contexte du marché.\n\n"
         f"EXTRAIT DU CCTP :\n{cctp_extract.strip() or '(non fourni)'}\n\n"
-        f"SLIDES GSS SÉLECTIONNÉES :\n{_format_chunks(selected_slides)}\n\n"
+        f"SLIDES GSS SÉLECTIONNÉES :\n{_format_chunks(selected_slides)}\n"
+        f"{cite}\n"
         f"Longueur cible : {target_words} mots. Pas de titre ni préambule.\n"
     )
