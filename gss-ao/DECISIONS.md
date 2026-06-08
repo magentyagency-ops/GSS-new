@@ -174,14 +174,22 @@ python -m backend.rag.indexer          # indexe le corpus (~$0.05)
 python -m scripts.rag_eval             # tableau comparatif + data/output/rag_eval.json
 ```
 
-| Section | Mots (mock/RAG) | Citations valides (RAG) | Citations fausses |
-|---|---|---|---|
-| i_qualifications | _à exécuter_ | _à exécuter_ | _à exécuter_ |
-| ii_rondes | _à exécuter_ | _à exécuter_ | _à exécuter_ |
-| iv_report_alarmes | _à exécuter_ | _à exécuter_ | _à exécuter_ |
+**Résultats mesurés** (index : 118 chunks, `gpt-4o-mini`, exécuté 2026-06-08) :
 
-> Résultats numériques à compléter après le run indexé (non exécuté ici faute de
-> clé OpenAI dans l'environnement de dev). Attendu : en mode RAG, présence de
-> citations vers de **vraies** slides (`citations_unknown` ≈ 0 grâce à la
-> validation), contre 0 source traçable en mock. Le validateur garantit qu'aucune
-> citation fausse ne passe inaperçue (signalée dans `citation_warnings`).
+| Section | Mots (mock/RAG) | Citations RAG (valides/fausses) | Citations mock (valides/fausses) |
+|---|---|---|---|
+| i_qualifications | 283 / 298 | **4 / 0** | 0 / 1 |
+| ii_rondes | 221 / 222 | **4 / 0** | 0 / 1 |
+| iv_report_alarmes | 187 / 198 | **3 / 0** | 0 / 1 |
+
+**Lecture** : à longueur quasi identique, le mode **RAG** produit **11 citations
+vers de vraies slides, 0 hallucination de source** (validées contre l'index),
+là où le mode **mock** ne fournit **aucune source traçable** et hallucine même
+une citation par section (1 source inventée, signalée par `citation_warnings`).
+Le RAG apporte donc la **traçabilité/sourçage** (gisement de valeur Vaché) sans
+surcoût de longueur. Index : `data/rag/slide_rep_ao.db` (6,2 Mo, 21/21 dossiers),
+coût d'indexation ≈ **$0,05** (embeddings + vision GPT-4o sur 10 PDF pauvres).
+
+> Pertinence qualitative (échelle 1-5) : à valider à l'aveugle par Mme Vaché sur
+> un échantillon ; les métriques automatiques ci-dessus (sourçage, anti-
+> hallucination) sont elles déjà objectivées par `scripts/rag_eval.py`.
