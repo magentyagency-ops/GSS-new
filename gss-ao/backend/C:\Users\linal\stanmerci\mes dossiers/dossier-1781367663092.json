@@ -1,0 +1,246 @@
+{
+  "id": "dossier-1781367663092",
+  "objet": "Définition des conditions d’exécution des prestations humaines de sûreté/ sécurité et télé-sécuritépour l’Université de Rouen Normandie",
+  "lots": [],
+  "dateLimite": "2026-04-08T00:00:00.000Z",
+  "statut": "En cours",
+  "responsable": "Sacha",
+  "dce_files": [
+    {
+      "nom": "DCEDCE MP2026_08/Annexe 3 CCTP - Pointeaux à installer v2026.docx",
+      "type": "Annexe",
+      "taille": "6929 Ko",
+      "statut": "ok"
+    },
+    {
+      "nom": "DCEDCE MP2026_08/6-DPGF et BPU - lot 1 - sites 76.docx",
+      "type": "BPU / DPGF",
+      "taille": "305 Ko",
+      "statut": "ok"
+    },
+    {
+      "nom": "DCEDCE MP2026_08/6-BPU - lot 3 - télésécurité.docx",
+      "type": "BPU / DPGF",
+      "taille": "298 Ko",
+      "statut": "ok"
+    },
+    {
+      "nom": "DCEDCE MP2026_08/3-CCAP 2026-08.docx",
+      "type": "CCAP",
+      "taille": "328 Ko",
+      "statut": "ok"
+    },
+    {
+      "nom": "DCEDCE MP2026_08/1-Acte d'Engagement.doc",
+      "type": "Acte d'Engagement",
+      "taille": "143 Ko",
+      "statut": "ok"
+    },
+    {
+      "nom": "DCEDCE MP2026_08/2-RC 2026-08.doc",
+      "type": "RC",
+      "taille": "122 Ko",
+      "statut": "ok"
+    },
+    {
+      "nom": "DCEDCE MP2026_08/4-CCTP 2026-08.docx",
+      "type": "CCTP",
+      "taille": "1783 Ko",
+      "statut": "ok"
+    },
+    {
+      "nom": "DCEDCE MP2026_08/Annexe 6 CCAP - Plans de l'Université de Rouen Normandie v2026.docx",
+      "type": "Annexe",
+      "taille": "1386 Ko",
+      "statut": "ok"
+    },
+    {
+      "nom": "DCEDCE MP2026_08/Annexe 2 CCTP - Profils des agents en place v2026.docx",
+      "type": "Annexe",
+      "taille": "336 Ko",
+      "statut": "ok"
+    },
+    {
+      "nom": "DCEDCE MP2026_08/Annexe 4 CCTP - Liste des agents logés v2026.docx",
+      "type": "Annexe",
+      "taille": "294 Ko",
+      "statut": "ok"
+    },
+    {
+      "nom": "DCEDCE MP2026_08/6-DPGF et BPU - lot 2 - sites 27.docx",
+      "type": "BPU / DPGF",
+      "taille": "302 Ko",
+      "statut": "ok"
+    },
+    {
+      "nom": "DCEDCE MP2026_08/Annexe 7 CCTP - FORMULAIRE_RESERV_PRESTA_SECU_2026.doc",
+      "type": "Annexe",
+      "taille": "16073 Ko",
+      "statut": "ok"
+    },
+    {
+      "nom": "DCEDCE MP2026_08/Annexe 1 CCTP - Effectifs et horaires des postes de sécurité v2026.docx",
+      "type": "Annexe",
+      "taille": "301 Ko",
+      "statut": "ok"
+    },
+    {
+      "nom": "DCEDCE MP2026_08/Annexe 5 CCTP - Liste des correspondants sûreté locaux v2026.docx",
+      "type": "Annexe",
+      "taille": "295 Ko",
+      "statut": "ok"
+    },
+    {
+      "nom": "DCEDCE MP2026_08/AWS-MPI-1815580-PC/Acted_engagement.pdf",
+      "type": "Acte d'Engagement",
+      "taille": "72 Ko",
+      "statut": "ok"
+    },
+    {
+      "nom": "DCEDCE MP2026_08/AWS-MPI-1815580-PC/BPU - DQE Sécurité.xlsx",
+      "type": "BPU / DPGF",
+      "taille": "39 Ko",
+      "statut": "ok"
+    },
+    {
+      "nom": "DCEDCE MP2026_08/AWS-MPI-1815580-PC/Cahierdesclausesadministrativesparticulieres.pdf",
+      "type": "Inconnu",
+      "taille": "81 Ko",
+      "statut": "ok"
+    },
+    {
+      "nom": "DCEDCE MP2026_08/AWS-MPI-1815580-PC/CCTP SECURITE GARDIENNAGE.pdf",
+      "type": "CCTP",
+      "taille": "865 Ko",
+      "statut": "ok"
+    }
+  ],
+  "acheteur": "UNIVERSITE DE ROUEN NORMANDIE",
+  "criteres": {
+    "valeur_technique_pts": 60,
+    "prix_pts": 40,
+    "sous_criteres": [
+      {
+        "libelle": "Moyens humains affectés au présent marché",
+        "points": 20,
+        "lots": [
+          1,
+          2
+        ]
+      },
+      {
+        "libelle": "Moyens matériels affectés au présent marché",
+        "points": 20,
+        "lots": [
+          1,
+          2
+        ]
+      },
+      {
+        "libelle": "Télésurveillance et modalités d’intervention",
+        "points": 40,
+        "lots": [
+          3
+        ]
+      },
+      {
+        "libelle": "Mise en œuvre de plans de qualité",
+        "points": 10,
+        "lots": []
+      },
+      {
+        "libelle": "Prise en compte du développement durable",
+        "points": 10,
+        "lots": []
+      }
+    ]
+  },
+  "pieces_candidature": [
+    {
+      "nom": "DC1 — Lettre de candidature",
+      "type": "candidature",
+      "obligatoire": true,
+      "alternative": null,
+      "ref_texte": "Les imprimés DC1 (Lettre de candidature) et DC2 ou tout document contenant les mêmes éléments"
+    },
+    {
+      "nom": "DC2 — Déclaration du candidat",
+      "type": "candidature",
+      "obligatoire": true,
+      "alternative": null,
+      "ref_texte": "Les imprimés DC1 (Lettre de candidature) et DC2 ou tout document contenant les mêmes éléments"
+    },
+    {
+      "nom": "Note de présentation de l'entreprise",
+      "type": "candidature",
+      "obligatoire": true,
+      "alternative": null,
+      "ref_texte": "Une note de présentation générale de l’entreprise décrivant ses qualifications ainsi que ses moyens techniques et humains."
+    },
+    {
+      "nom": "Liste de références (< 3 ans)",
+      "type": "candidature",
+      "obligatoire": true,
+      "alternative": null,
+      "ref_texte": "Une liste détaillée des références de l’entreprise dans le domaine de la présente consultation datant de moins de trois ans."
+    },
+    {
+      "nom": "Attestation de régularité fiscale",
+      "type": "candidature",
+      "obligatoire": true,
+      "alternative": null,
+      "ref_texte": "Une attestation de régularité de fiscale"
+    },
+    {
+      "nom": "Attestations d'assurance",
+      "type": "candidature",
+      "obligatoire": true,
+      "alternative": null,
+      "ref_texte": "Les attestations d'assurance en cours de validité et couvrant le domaine d'activité relatif au présent marché."
+    },
+    {
+      "nom": "DUME (alternative à DC1/DC2)",
+      "type": "candidature",
+      "obligatoire": false,
+      "alternative": "Remplace DC1+DC2",
+      "ref_texte": "En application de l’article R2143-4 du Code de la Commande Publique, le candidat a la possibilité de présenter sa candidature sous la forme d’un DUME (Document Unique de Marché Européen)."
+    }
+  ],
+  "pieces_offre": [
+    {
+      "nom": "Acte d'Engagement complété, daté et signé",
+      "type": "offre",
+      "obligatoire": true,
+      "alternative": null,
+      "ref_texte": "L’Acte d’Engagement complété, daté et signé par une personne dûment habilitée à engager l’entreprise."
+    },
+    {
+      "nom": "BPU — Bordereau de Prix Unitaire",
+      "type": "offre",
+      "obligatoire": true,
+      "alternative": null,
+      "ref_texte": "Le ou les BPU (Bordereau de Prix Unitaire) et la ou les DPGF (Décomposition du Prix Global et Forfaitaire) complétés, datés et signés."
+    },
+    {
+      "nom": "DPGF — Décomposition du Prix Global et Forfaitaire",
+      "type": "offre",
+      "obligatoire": true,
+      "alternative": null,
+      "ref_texte": "Le ou les BPU (Bordereau de Prix Unitaire) et la ou les DPGF (Décomposition du Prix Global et Forfaitaire) complétés, datés et signés."
+    },
+    {
+      "nom": "Mémoire technique valant cadre de réponse",
+      "type": "offre",
+      "obligatoire": true,
+      "alternative": null,
+      "ref_texte": "Le mémoire technique valant « cadre de réponse » complété, daté et signé."
+    },
+    {
+      "nom": "RIB de l'entreprise",
+      "type": "offre",
+      "obligatoire": true,
+      "alternative": null,
+      "ref_texte": "Le RIB de l’entreprise."
+    }
+  ]
+}
