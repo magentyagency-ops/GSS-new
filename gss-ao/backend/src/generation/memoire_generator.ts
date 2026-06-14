@@ -239,6 +239,44 @@ function bodyTextToLines(text: string): string[] {
     .map(l => l.trim());
 }
 
+// Fix V1.1 — image décorative "agent + chien berger allemand" à retirer (page I. PRESENTATION).
+const DOG_IMAGE = 'image8.jpeg';
+
+/** Résout les rIds d'une cible média donnée depuis le XML de relations. */
+function ridsForMedia(relsXml: string, mediaName: string): string[] {
+  const re = new RegExp(`Id="(rId\\d+)"[^>]*Target="media/${mediaName.replace(/\./g, '\\.')}"`, 'g');
+  const ids: string[] = [];
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(relsXml)) !== null) ids.push(m[1]);
+  return ids;
+}
+
+/**
+ * Fix V1.1 — retire du document le bloc décoratif "agent + chien" : pour chaque référence
+ * (DrawingML `r:embed` ou VML `r:id`) à l'une des `dogRids`, remonte au `<w:r>` englobant
+ * et le supprime (ce run contient le `mc:AlternateContent` du bloc chien). Renvoie le
+ * nombre de runs retirés. N'affecte que les images listées dans `dogRids`.
+ */
+function removeDogImageReferences(doc: any, dogRids: string[]): number {
+  if (!dogRids.length) return 0;
+  const ridSet = new Set(dogRids);
+  const runsToRemove = new Set<any>();
+  const scan = (localName: string, attr: string) => {
+    getElementsWithLocalName(doc.documentElement, localName).forEach((el: any) => {
+      const id = el.getAttribute(attr);
+      if (id && ridSet.has(id)) {
+        const run = getParentWithLocalName(el, 'r');
+        if (run) runsToRemove.add(run);
+      }
+    });
+  };
+  scan('blip', 'r:embed');       // DrawingML (mc:Choice)
+  scan('imagedata', 'r:id');     // VML (mc:Fallback)
+  let removed = 0;
+  runsToRemove.forEach((run: any) => { if (run.parentNode) { run.parentNode.removeChild(run); removed++; } });
+  return removed;
+}
+
 /**
  * Refonte V1 — sur une page DUPLIQUÉE, retire les images de fond pleine page
  * "inutiles" (anchors `behindDoc="1"` porteurs d'une photo) afin de laisser
@@ -264,12 +302,19 @@ function stripStandaloneBgImages(paras: any[]): number {
   return removed;
 }
 
-/** Force la couleur de tous les runs (texte) d'un sous-arbre — lisibilité sur fond gris. */
+/**
+ * Force la couleur des runs (texte) d'un sous-arbre — lisibilité sur fond gris.
+ * Fix V1.1 : on ÉPARGNE les bandeaux de titre (`txbxContent`, ex. "NOS AGENTS …",
+ * "I. PRESENTATION") dont le fond est foncé : y forcer un texte sombre le rendrait
+ * invisible. Le corps (hors `txbxContent`) reste forcé en sombre pour rester lisible.
+ */
 function forceTextColor(paras: any[], color: string) {
   paras.forEach((p) => {
     getElementsWithLocalName(p, 'r').forEach((r: any) => {
       // ne pas toucher aux runs purement graphiques (drawing/pict) sans texte
       if (getElementsWithLocalName(r, 't').length === 0) return;
+      // bandeau de titre → conserver la couleur claire d'origine (lisible sur fond foncé)
+      if (getParentWithLocalName(r, 'txbxContent')) return;
       let rPr = findLocalNameChild(r, 'rPr');
       if (!rPr) {
         rPr = r.ownerDocument.createElementNS(W_NS, 'w:rPr');
@@ -1439,6 +1484,22 @@ Renvoie uniquement un objet JSON valide contenant les ${batchPrompts.length} val
           zip.file('word/settings.xml', s);
         }
       }
+
+      // Fix V1.1 — retirer l'image décorative "agent + chien" (image8.jpeg) : références
+      // dans document.xml, puis relation orpheline + fichier média (gain de poids).
+      const docRelsFile = zip.file('word/_rels/document.xml.rels');
+      const dogRids = docRelsFile ? ridsForMedia(docRelsFile.asText(), DOG_IMAGE) : [];
+      const dogRefsRemoved = removeDogImageReferences(xmlDoc, dogRids);
+      if (dogRefsRemoved > 0 && docRelsFile) {
+        let r = docRelsFile.asText();
+        dogRids.forEach((rid) => {
+          r = r.replace(new RegExp(`<Relationship Id="${rid}"[^>]*/>`, 'g'), '');
+        });
+        zip.file('word/_rels/document.xml.rels', r);
+        const dogFile = `word/media/${DOG_IMAGE}`;
+        if (zip.file(dogFile)) delete (zip as any).files[dogFile];
+      }
+      console.log(`[MemoireGenerator] Fix V1.1 : image chien (${DOG_IMAGE}) — ${dogRefsRemoved} référence(s) retirée(s) [rIds: ${dogRids.join(', ') || 'aucun'}].`);
     }
 
     // 2. Personnalisation du client (couverture/sommaire) sur le document + en-têtes/pieds.
