@@ -239,6 +239,130 @@ function bodyTextToLines(text: string): string[] {
     .map(l => l.trim());
 }
 
+// V1.2 — logos GSS (bandeau header) à toujours conserver.
+const HEADER_LOGOS = new Set(['image5.png', 'image2.png', 'image32.png']);
+// Seuil "photo" (les logos/filets/puces font < 40 Ko).
+const DECORATIVE_MIN_BYTES = 40000;
+
+/**
+ * V1.2 — Supprime CATÉGORIQUEMENT les blocs décoratifs "photo d'agent + légende"
+ * (« NOS AGENTS CYNOPHILES » + chien, « NOS AGENTS INCENDIE SSIAP » + extincteurs, etc.).
+ *
+ * Critère robuste, au niveau du run `<w:r>` :
+ *  - le run embarque une PHOTO > 40 Ko (hors logos `image5/2/32`) ;
+ *  - ET contient EXACTEMENT 1 légende distincte courte (`txbxContent`, ≤ 6 mots).
+ *
+ * → cible les 7 blocs décoratifs ; ÉPARGNE les logos, les fonds (`behindDoc`), les icônes,
+ *   et les DIAGRAMMES fonctionnels (plusieurs légendes : workflow appli, planning…).
+ *
+ * Retire le run + (si plus référencés) la relation rId et le fichier média.
+ */
+/** Étiquette décorative du maître (ALL-CAPS, ex. "NOS AGENTS CYNOPHILES") vs titre injecté (casse normale). */
+function isDecorativeLabel(s: string): boolean {
+  const letters = s.replace(/[^A-Za-zÀ-ÿ]/g, '');
+  return letters.length > 3 && s === s.toUpperCase();
+}
+
+/** Supprime un élément de son parent (sécurisé). */
+function removeNode(n: any): boolean {
+  if (n && n.parentNode) { n.parentNode.removeChild(n); return true; }
+  return false;
+}
+
+function removeAllDecorativeBlocks(
+  doc: any, ridToMedia: Record<string, string>, mediaSize: Record<string, number>,
+): { removedImages: string[]; removedReferences: number } {
+  const removedImages = new Set<string>();
+  let removedReferences = 0;
+  const isDecoBlip = (b: any) => {
+    const m = ridToMedia[b.getAttribute('r:embed')];
+    return !!m && !HEADER_LOGOS.has(m) && (mediaSize[m] || 0) > DECORATIVE_MIN_BYTES;
+  };
+  const runs = getElementsWithLocalName(doc.documentElement, 'r');
+  runs.forEach((r: any) => {
+    const photoBlips = getElementsWithLocalName(r, 'blip').filter(isDecoBlip);
+    if (photoBlips.length === 0) return;
+
+    // légendes distinctes courtes dans ce run
+    const caps = new Set<string>();
+    getElementsWithLocalName(r, 'txbxContent').forEach((tx: any) => {
+      const t = getElementText(tx).replace(/\s+/g, ' ').trim();
+      if (t && t.split(' ').length <= 6) caps.add(t);
+    });
+    if (caps.size !== 1) return; // 0 légende, ou diagramme multi-légendes → conserver
+
+    const caption = [...caps][0];
+    const photoMedia = photoBlips.map((b: any) => ridToMedia[b.getAttribute('r:embed')]);
+
+    if (isDecorativeLabel(caption)) {
+      // Bloc décoratif du maître ("NOS AGENTS …") → retirer le run entier (photo + légende).
+      if (removeNode(r)) { removedReferences++; photoMedia.forEach((m: string) => removedImages.add(m)); }
+    } else {
+      // Page clonée : la légende est le TITRE injecté (à conserver) → retirer SEULEMENT la photo.
+      let removedHere = false;
+      photoBlips.forEach((b: any) => { if (removeNode(getParentWithLocalName(b, 'pic'))) removedHere = true; });
+      getElementsWithLocalName(r, 'imagedata').forEach((vi: any) => {
+        const m = ridToMedia[vi.getAttribute('r:id')];
+        if (m && !HEADER_LOGOS.has(m) && (mediaSize[m] || 0) > DECORATIVE_MIN_BYTES) {
+          if (removeNode(getParentWithLocalName(vi, 'shape') || getParentWithLocalName(vi, 'rect'))) removedHere = true;
+        }
+      });
+      if (removedHere) { removedReferences++; photoMedia.forEach((m: string) => removedImages.add(m)); }
+    }
+  });
+  return { removedImages: [...removedImages], removedReferences };
+}
+
+/** Couleur sombre (luminance perçue faible) ? */
+function isDarkColor(hex: string): boolean {
+  if (!/^[0-9A-Fa-f]{6}$/.test(hex)) return false;
+  const r = parseInt(hex.slice(0, 2), 16), g = parseInt(hex.slice(2, 4), 16), b = parseInt(hex.slice(4, 6), 16);
+  return (0.299 * r + 0.587 * g + 0.114 * b) < 140;
+}
+
+/** La zone de titre (`txbxContent`) a-t-elle un fond FONCÉ (forme `wsp` à `solidFill` sombre, ou VML fillcolor sombre) ? */
+function textboxHasDarkBand(tx: any): boolean {
+  const wsp = getParentWithLocalName(tx, 'wsp');
+  if (wsp) {
+    const spPr = findLocalNameChild(wsp, 'spPr');
+    const fill = spPr ? findLocalNameChild(spPr, 'solidFill') : null;
+    const clr = fill ? findLocalNameChild(fill, 'srgbClr') : null;
+    const v = clr ? clr.getAttribute('val') : '';
+    if (v && isDarkColor(v)) return true;
+  }
+  // VML : <v:shape style fillcolor="#494545">
+  const shape = getParentWithLocalName(tx, 'shape') || getParentWithLocalName(tx, 'rect');
+  if (shape) {
+    const fc = (shape.getAttribute('fillcolor') || '').replace('#', '');
+    if (fc && isDarkColor(fc)) return true;
+  }
+  return false;
+}
+
+/**
+ * V1.2 — Rend le BANDEAU de section lisible sur CHAQUE page (cohérence master + clones).
+ * Pour chaque zone de titre (`txbxContent`) : si elle a un fond FONCÉ → on conserve la
+ * couleur d'origine (texte clair/rouge, lisible) ; sinon (texte sur fond gris) → on force
+ * le texte en sombre (`DUP_TEXT_COLOR`) pour le rendre lisible. Document-wide.
+ * Retourne le nombre de runs recolorés.
+ */
+function fixBandeauContrast(doc: any): number {
+  let recolored = 0;
+  getElementsWithLocalName(doc.documentElement, 'txbxContent').forEach((tx: any) => {
+    if (textboxHasDarkBand(tx)) return; // fond foncé → couleur claire d'origine conservée
+    getElementsWithLocalName(tx, 'r').forEach((r: any) => {
+      if (getElementsWithLocalName(r, 't').length === 0) return;
+      let rPr = findLocalNameChild(r, 'rPr');
+      if (!rPr) { rPr = r.ownerDocument.createElementNS(W_NS, 'w:rPr'); r.insertBefore(rPr, r.firstChild); }
+      let col = findLocalNameChild(rPr, 'color');
+      if (!col) { col = r.ownerDocument.createElementNS(W_NS, 'w:color'); rPr.appendChild(col); }
+      col.setAttribute('w:val', DUP_TEXT_COLOR);
+      recolored++;
+    });
+  });
+  return recolored;
+}
+
 /**
  * Refonte V1 — sur une page DUPLIQUÉE, retire les images de fond pleine page
  * "inutiles" (anchors `behindDoc="1"` porteurs d'une photo) afin de laisser
@@ -264,12 +388,19 @@ function stripStandaloneBgImages(paras: any[]): number {
   return removed;
 }
 
-/** Force la couleur de tous les runs (texte) d'un sous-arbre — lisibilité sur fond gris. */
+/**
+ * Force la couleur des runs (texte) d'un sous-arbre — lisibilité sur fond gris.
+ * V1.2 : on ÉPARGNE les bandeaux de titre (`txbxContent`, ex. "I. PRESENTATION",
+ * "NOS AGENTS …") dont le fond est foncé — y forcer un texte sombre le rendrait
+ * invisible. Le corps (hors `txbxContent`) reste forcé en sombre (lisible sur le gris).
+ */
 function forceTextColor(paras: any[], color: string) {
   paras.forEach((p) => {
     getElementsWithLocalName(p, 'r').forEach((r: any) => {
       // ne pas toucher aux runs purement graphiques (drawing/pict) sans texte
       if (getElementsWithLocalName(r, 't').length === 0) return;
+      // bandeau de titre → conserver la couleur claire d'origine (lisible sur fond foncé)
+      if (getParentWithLocalName(r, 'txbxContent')) return;
       let rPr = findLocalNameChild(r, 'rPr');
       if (!rPr) {
         rPr = r.ownerDocument.createElementNS(W_NS, 'w:rPr');
@@ -1507,6 +1638,53 @@ Renvoie uniquement un objet JSON valide contenant les ${batchPrompts.length} val
       inserted++;
     });
 
+    // 4bis. V1.2 — suppression catégorique des blocs décoratifs "photo agent + légende"
+    //       sur tout le document (pages maître ET pages clonées), en une passe.
+    let decoImages: string[] = [];
+    let decoRefs = 0;
+    if (refonte) {
+      const relsFile = zip.file('word/_rels/document.xml.rels');
+      const ridToMedia: Record<string, any> = {};
+      if (relsFile) {
+        const relsTxt = relsFile.asText();
+        for (const m of relsTxt.matchAll(/Id="(rId\d+)"[^>]*Target="(media\/[^"]+)"/g)) {
+          ridToMedia[m[1]] = m[2].split('/').pop();
+        }
+      }
+      const mediaSize: Record<string, number> = {};
+      Object.keys(zip.files).filter((n) => n.startsWith('word/media/')).forEach((n) => {
+        mediaSize[n.split('/').pop() as string] = zip.file(n)!.asUint8Array().length;
+      });
+      const res = removeAllDecorativeBlocks(xmlDoc, ridToMedia, mediaSize);
+      decoImages = res.removedImages;
+      decoRefs = res.removedReferences;
+
+      // V1.2 — bandeau de section lisible sur chaque page (master + clones).
+      const recolored = fixBandeauContrast(xmlDoc);
+      console.log(`[MemoireGenerator] V1.2 bandeau : ${recolored} run(s) de titre recoloré(s) pour lisibilité.`);
+
+      // Purge des relations + fichiers média devenus orphelins (les images retirées ne sont
+      // plus référencées nulle part dans document.xml après suppression des runs).
+      const stillReferenced = new Set(
+        (serializer.serializeToString(xmlDoc).match(/r:(?:embed|id)="(rId\d+)"/g) || [])
+          .map((s) => s.replace(/.*"(rId\d+)".*/, '$1')),
+      );
+      if (relsFile) {
+        let relsTxt = relsFile.asText();
+        for (const img of decoImages) {
+          // rIds pointant vers cette image et qui ne sont plus référencés
+          for (const m of [...relsTxt.matchAll(new RegExp(`Id="(rId\\d+)"[^>]*Target="media/${img.replace(/\./g, '\\.')}"`, 'g'))]) {
+            if (!stillReferenced.has(m[1])) {
+              relsTxt = relsTxt.replace(new RegExp(`<Relationship Id="${m[1]}"[^>]*/>`, 'g'), '');
+            }
+          }
+          const mediaPath = `word/media/${img}`;
+          if (zip.file(mediaPath)) delete (zip as any).files[mediaPath];
+        }
+        zip.file('word/_rels/document.xml.rels', relsTxt);
+      }
+    }
+
     // 5. Sérialiser document.xml (médias conservés) et sauvegarder.
     zip.file('word/document.xml', serializer.serializeToString(xmlDoc));
     const buf = zip.generate({ type: 'nodebuffer', compression: 'DEFLATE' });
@@ -1514,18 +1692,20 @@ Renvoie uniquement un objet JSON valide contenant les ${batchPrompts.length} val
     const outputPath = path.join(this.responseDir, outputFileName);
     fs.writeFileSync(outputPath, buf);
 
-    console.log(`[MemoireGenerator] AO RNE personnalisé : ${inserted} page(s) ajoutée(s), ${spreads.length} page(s)-modèle, refonte=${refonte} (fond gris ${refonte ? BACKGROUND_COLOR : 'off'}, ${stats.imagesRemoved} image(s) de fond retirée(s)), client="${clientName || '(non personnalisé)'}" → ${outputPath}`);
+    console.log(`[MemoireGenerator] AO RNE personnalisé : ${inserted} page(s) ajoutée(s), ${spreads.length} page(s)-modèle, refonte=${refonte} (fond gris ${refonte ? BACKGROUND_COLOR : 'off'}, ${stats.imagesRemoved} image(s) de fond retirée(s), ${decoRefs} bloc(s) décoratif(s) retiré(s): ${decoImages.join(', ') || 'aucun'}), client="${clientName || '(non personnalisé)'}" → ${outputPath}`);
 
     return {
       filePath: outputPath,
       generatedData: {
         mode: refonte
-          ? `Refonte V1 : fond gris uniforme #${BACKGROUND_COLOR} + bandeau conservé + images de fond retirées des pages dupliquées`
+          ? `Refonte V1.2 : fond gris #${BACKGROUND_COLOR} + bandeau lisible + blocs décoratifs retirés`
           : 'AO RNE préservé (design intact) + pages dupliquées',
         client: clientName || '(non personnalisé)',
         pages_ajoutees: String(inserted),
         pages_modeles: String(spreads.length),
         images_fond_retirees: String(stats.imagesRemoved),
+        blocs_decoratifs_retires: String(decoRefs),
+        images_decoratives: decoImages.join(', '),
       },
     };
   }
