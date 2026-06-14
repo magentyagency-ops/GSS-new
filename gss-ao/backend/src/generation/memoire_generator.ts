@@ -7,6 +7,7 @@ import { DB } from '../core/db';
 import { extractText } from '../ingestion/docConverter';
 // @ts-ignore
 import { DOMParser, XMLSerializer } from '@xmldom/xmldom';
+import { hasUncaughtExceptionCaptureCallback } from 'process';
 
 // Modèle utilisé pour la génération. gpt-4o-mini a une limite TPM bien plus élevée (200k vs 30k
 // pour gpt-4o sur ce compte) → génération rapide sans throttling. Surchargeable par env.
@@ -164,15 +165,24 @@ function getParagraphStyle(p: any): string {
 
 // ─── Construction d'un mémoire PROPRE (XML en chaîne, zéro DOM) ───
 // On ne touche plus jamais au DOM d'AO RNE (le re-sérialiser dégrade sa maquette).
-// À la place, on génère un document.xml NEUF, dont le rendu reprend l'identité
-// visuelle d'AO RNE : fond anthracite, texte crème, titres clairs, accent vert GSS.
+// À la place, on génère un document.xml NEUF, dont le rendu reprend une identité
+// visuelle GSS épurée : fond gris uniforme clair, texte foncé lisible, accent rouge GSS.
 
-// Palette extraite d'AO RNE.docx (couleurs dominantes du design).
-const COL_BG = '494545';       // fond de page anthracite
-const COL_TITLE = 'FFFFFF';    // titres (blanc)
-const COL_BODY = 'EFE7D3';     // corps de texte (crème, lisible sur fond sombre)
-const COL_ACCENT = 'C81E1E';   // rouge GSS (filets / labels)
-const COL_MUTED = 'D9D9D9';    // gris clair (sous-texte)
+// ─── Refonte V1 du template (fond gris uniforme + thème clair) ───
+// Le fond de page (Word: <w:background>). Gris clair lisible, configurable.
+// Repli possible sur 'FFFFFF' si un rendu Word pose problème (cf. garde-fou).
+const BACKGROUND_COLOR = 'E5E5E5';   // gris clair uniforme
+
+// Palette « thème clair » : texte foncé sur fond gris clair (lisibilité garantie).
+const COL_BG = BACKGROUND_COLOR; // fond de page (gris clair)
+const COL_TITLE = '1A1A1A';      // titres (quasi-noir)
+const COL_BODY = '2B2B2B';       // corps de texte (gris très foncé)
+const COL_ACCENT = 'C81E1E';     // rouge GSS (filets / labels)
+const COL_MUTED = '595959';      // gris moyen (sous-texte)
+
+// Bandeau d'en-tête à conserver (image GSS porteuse du titre dans AO RNE.docx = image2.png).
+const HEADER_IMAGE_NAME = 'image2.png';
+const HEADER_REL_ID = 'rIdHdrGss';   // Id de la relation document→header (unique)
 
 // Tailles en demi-points (22 = 11 pt) ; espacements en twips (240 = 12 pt).
 const SZ_BODY = 22;
@@ -1118,14 +1128,24 @@ Renvoie uniquement un objet JSON valide contenant les ${batchPrompts.length} val
    * Cas "sans cadre imposé" (mode B / réponse libre). On NE touche PAS au DOM d'AO RNE
    * (le re-sérialiser dégrade sa maquette, et son identité est gravée dans des images
    * donc non personnalisable en texte). À la place on CONSTRUIT un document NEUF et
-   * propre, dont le rendu reprend l'identité visuelle d'AO RNE (fond anthracite, texte
-   * crème, titres clairs, accent vert GSS), rempli avec le contenu généré (DCE + doc GSS)
-   * et personnalisé via la page de garde (client / référence issus du dossier).
+   * propre, dont le rendu reprend une identité GSS épurée (refonte V1 :
+   * fond gris uniforme clair, texte foncé lisible, accent rouge GSS, bandeau d'en-tête
+   * GSS conservé et répété sur chaque page, images décoratives retirées), rempli avec le
+   * contenu généré (DCE + doc GSS) et personnalisé via la page de garde (client / référence).
+   *
+   * `options.noTemplate` : produit à la place un DOCX NU (aucun ZIP de référence,
+   * styles Word par défaut, ni fond, ni en-tête, ni page de garde) — utilisé pour la
+   * comparaison « avec template refondu » vs « sans template ».
    */
   public async assembleFromSections(
     dossierId: string,
     chapters: AssembleChapter[],
+    options: { noTemplate?: boolean } = {},
   ): Promise<{ filePath: string; generatedData: Record<string, string> }> {
+    if (options.noTemplate) {
+      return this.assembleNoTemplate(chapters);
+    }
+
     // 1. Infos d'en-tête (page de garde) : base si renseignée, sinon analyse du DCE.
     const cover = await this.getCoverInfo(dossierId);
 
@@ -1158,20 +1178,26 @@ Renvoie uniquement un objet JSON valide contenant les ${batchPrompts.length} val
       throw new Error('Aucun chapitre généré à exporter (sections vides).');
     }
 
-    // 3. Section finale : format A4 d'AO RNE, marges propres.
+    // 3. Section finale : format A4 d'AO RNE, marges propres + référence d'en-tête
+    //    (le bandeau GSS se répète ainsi sur chaque page).
     const sectPr =
-      '<w:sectPr><w:pgSz w:w="11910" w:h="16850"/>' +
-      '<w:pgMar w:top="1134" w:right="1134" w:bottom="1134" w:left="1134" w:header="0" w:footer="0" w:gutter="0"/>' +
+      '<w:sectPr>' +
+      `<w:headerReference w:type="default" r:id="${HEADER_REL_ID}"/>` +
+      '<w:pgSz w:w="11910" w:h="16850"/>' +
+      '<w:pgMar w:top="1418" w:right="1134" w:bottom="1134" w:left="1134" w:header="567" w:footer="0" w:gutter="0"/>' +
       '</w:sectPr>';
 
+    // xmlns:r requis pour la référence d'en-tête (r:id).
     const documentXml =
       '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
-      '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">' +
+      '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"' +
+      ' xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">' +
       `<w:background w:color="${COL_BG}"/>` +
       `<w:body>${bodyParts.join('')}${sectPr}</w:body></w:document>`;
 
     // 4. Repartir du zip AO RNE (styles/polices/thème valides) mais réécrire document.xml,
-    //    activer l'affichage du fond, et retirer les médias devenus inutiles (doc léger).
+    //    activer l'affichage du fond, conserver UNIQUEMENT le bandeau d'en-tête GSS
+    //    (image2.png) et retirer les ~220 images décoratives des pages dupliquées.
     const templatePath = path.join(this.templateDir, 'Mémoire technique', 'AO RNE.docx');
     if (!fs.existsSync(templatePath)) throw new Error(`Template de référence introuvable : ${templatePath}`);
     const zip = new PizZip(fs.readFileSync(templatePath));
@@ -1187,27 +1213,174 @@ Renvoie uniquement un objet JSON valide contenant les ${batchPrompts.length} val
       }
     }
 
-    // Retirer les médias/dessins (plus référencés) pour alléger et purifier le fichier.
+    // 4a. Retirer TOUTES les images décoratives sauf le bandeau d'en-tête (image dupliquée
+    //     sur les pages = inutile dans une génération propre). On garde le fichier media
+    //     dans le .docx source (revert), mais on ne le référence plus.
+    let removedMedia = 0;
     Object.keys(zip.files)
-      .filter((n) => n.startsWith('word/media/'))
-      .forEach((n) => { delete (zip as any).files[n]; });
+      .filter((n) => n.startsWith('word/media/') && n !== `word/media/${HEADER_IMAGE_NAME}`)
+      .forEach((n) => { delete (zip as any).files[n]; removedMedia++; });
     const relsFile = zip.file('word/_rels/document.xml.rels');
     if (relsFile) {
+      // Le nouveau document.xml ne référence aucun média : on purge toutes les relations média.
       const rels = relsFile.asText().replace(/<Relationship\b[^>]*Target="media\/[^"]*"[^>]*\/>/g, '');
       zip.file('word/_rels/document.xml.rels', rels);
     }
+
+    // 4b. En-tête : créer word/header1.xml (bandeau GSS), sa relation vers image2.png,
+    //     l'override de type de contenu, et la relation header dans document.xml.rels.
+    this.injectHeader(zip);
 
     const buf = zip.generate({ type: 'nodebuffer', compression: 'DEFLATE' });
     const outputFileName = `Mémoire technique GSS_${Date.now()}.docx`;
     const outputPath = path.join(this.responseDir, outputFileName);
     fs.writeFileSync(outputPath, buf);
 
-    console.log(`[MemoireGenerator] Mémoire propre généré : ${chaptersOut} chapitre(s), ${sectionsOut} section(s) → ${outputPath}`);
+    console.log(`[MemoireGenerator] Mémoire propre généré (fond gris ${COL_BG}, header conservé, ${removedMedia} média(s) retiré(s)) : ${chaptersOut} chapitre(s), ${sectionsOut} section(s) → ${outputPath}`);
 
     return {
       filePath: outputPath,
       generatedData: {
-        mode: 'Document propre (identité AO RNE, fond anthracite)',
+        mode: `Document propre refondu (fond gris uniforme #${COL_BG}, bandeau GSS conservé)`,
+        chapitres: String(chaptersOut),
+        sections: String(sectionsOut),
+        medias_retires: String(removedMedia),
+      },
+    };
+  }
+
+  /**
+   * Injecte un en-tête (word/header1.xml) affichant le bandeau GSS (image2.png),
+   * répété sur chaque page via le headerReference du sectPr. Crée la relation
+   * header→image, l'override [Content_Types] et la relation document→header.
+   */
+  private injectHeader(zip: PizZip): void {
+    // Bandeau GSS inline, centré. Ratio d'origine 3134906×1229188 (≈ 2,55:1).
+    const cx = 2200000;
+    const cy = Math.round(cx * (1229188 / 3134906)); // conserve le ratio
+    const headerXml =
+      '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+      '<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"' +
+      ' xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"' +
+      ' xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"' +
+      ' xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"' +
+      ' xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">' +
+      '<w:p><w:pPr><w:jc w:val="center"/><w:spacing w:after="0"/></w:pPr><w:r><w:drawing>' +
+      '<wp:inline distT="0" distB="0" distL="0" distR="0">' +
+      `<wp:extent cx="${cx}" cy="${cy}"/><wp:effectExtent l="0" t="0" r="0" b="0"/>` +
+      '<wp:docPr id="900" name="BandeauGSS"/>' +
+      '<wp:cNvGraphicFramePr><a:graphicFrameLocks noChangeAspect="1"/></wp:cNvGraphicFramePr>' +
+      '<a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">' +
+      '<pic:pic><pic:nvPicPr><pic:cNvPr id="900" name="BandeauGSS"/><pic:cNvPicPr/></pic:nvPicPr>' +
+      `<pic:blipFill><a:blip r:embed="rId1"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill>` +
+      `<pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="${cx}" cy="${cy}"/></a:xfrm>` +
+      '<a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic>' +
+      '</a:graphicData></a:graphic></wp:inline>' +
+      '</w:drawing></w:r></w:p></w:hdr>';
+    zip.file('word/header1.xml', headerXml);
+
+    // Relation header → image bandeau.
+    zip.file('word/_rels/header1.xml.rels',
+      '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+      '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+      `<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/${HEADER_IMAGE_NAME}"/>` +
+      '</Relationships>');
+
+    // Relation document → header (l'Id doit correspondre au headerReference du sectPr).
+    const docRels = zip.file('word/_rels/document.xml.rels');
+    if (docRels) {
+      let r = docRels.asText();
+      if (!r.includes(HEADER_REL_ID)) {
+        r = r.replace(/<\/Relationships>\s*$/,
+          `<Relationship Id="${HEADER_REL_ID}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header1.xml"/></Relationships>`);
+        zip.file('word/_rels/document.xml.rels', r);
+      }
+    }
+
+    // Override [Content_Types] pour header1.xml.
+    const ct = zip.file('[Content_Types].xml');
+    if (ct) {
+      let c = ct.asText();
+      if (!c.includes('header1.xml')) {
+        c = c.replace(/<\/Types>\s*$/,
+          '<Override PartName="/word/header1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"/></Types>');
+        zip.file('[Content_Types].xml', c);
+      }
+    }
+  }
+
+  /**
+   * Construit un DOCX NU (sans cadre, sans ZIP de référence) : styles Word par défaut,
+   * aucun fond de page, aucun en-tête/pied, aucune page de garde. Sert de point de
+   * comparaison « génération sans template » face au template refondu.
+   */
+  private async assembleNoTemplate(
+    chapters: AssembleChapter[],
+  ): Promise<{ filePath: string; generatedData: Record<string, string> }> {
+    const W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
+    const esc = (s: string) => escXml(s);
+    // Rendu minimaliste : titres en gras (pas de styles Heading), corps en texte brut.
+    const plainRun = (t: string, bold = false, sz?: number) =>
+      `<w:r><w:rPr>${bold ? '<w:b/>' : ''}${sz ? `<w:sz w:val="${sz}"/>` : ''}</w:rPr>` +
+      `<w:t xml:space="preserve">${esc(t)}</w:t></w:r>`;
+    const plainPara = (inner: string) => `<w:p>${inner}</w:p>`;
+
+    const body: string[] = [];
+    let chaptersOut = 0;
+    let sectionsOut = 0;
+    chapters.forEach((chapter, idx) => {
+      if (!chapter || !chapter.sections || chapter.sections.length === 0) return;
+      const roman = chapter.key || ['I', 'II', 'III', 'IV', 'V', 'VI'][idx] || String(idx + 1);
+      body.push(plainPara(plainRun(`${roman}. ${chapter.title || ''}`.trim(), true, 32)));
+      for (const sec of chapter.sections) {
+        const title = sec.title?.trim();
+        if (title) body.push(plainPara(plainRun(title, true, 26)));
+        for (const rawLine of String(sec.text || '').replace(/\r\n/g, '\n').split('\n')) {
+          const line = rawLine.replace(/[`#*_>-]/g, '').trim();
+          if (line) body.push(plainPara(plainRun(line)));
+        }
+        sectionsOut++;
+      }
+      chaptersOut++;
+    });
+
+    if (chaptersOut === 0) throw new Error('Aucun chapitre généré à exporter (sections vides).');
+
+    const sectPr = '<w:sectPr><w:pgSz w:w="11906" w:h="16838"/>' +
+      '<w:pgMar w:top="1417" w:right="1417" w:bottom="1417" w:left="1417" w:header="708" w:footer="708" w:gutter="0"/></w:sectPr>';
+    const documentXml =
+      '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+      `<w:document xmlns:w="${W}"><w:body>${body.join('')}${sectPr}</w:body></w:document>`;
+
+    const zip = new PizZip();
+    zip.file('[Content_Types].xml',
+      '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+      '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">' +
+      '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>' +
+      '<Default Extension="xml" ContentType="application/xml"/>' +
+      '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>' +
+      '</Types>');
+    zip.file('_rels/.rels',
+      '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+      '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+      '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>' +
+      '</Relationships>');
+    zip.file('word/document.xml', documentXml);
+    zip.file('word/_rels/document.xml.rels',
+      '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+      '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"></Relationships>');
+
+    const buf = zip.generate({ type: 'nodebuffer', compression: 'DEFLATE' });
+    const outputFileName = `Mémoire technique GSS (sans template)_${Date.now()}.docx`;
+    const outputPath = path.join(this.responseDir, outputFileName);
+    fs.writeFileSync(outputPath, buf);
+
+    console.log(`[MemoireGenerator] Mémoire NU (sans template) généré : ${chaptersOut} chapitre(s), ${sectionsOut} section(s) → ${outputPath}`);
+
+    return {
+      filePath: outputPath,
+      generatedData: {
+        mode: 'Document nu (sans template, styles Word par défaut)',
         chapitres: String(chaptersOut),
         sections: String(sectionsOut),
       },
