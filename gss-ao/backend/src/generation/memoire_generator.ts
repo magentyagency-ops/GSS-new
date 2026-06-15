@@ -527,6 +527,61 @@ function cloneSpread(
   return [...newHeading, ...newBody];
 }
 
+// ─── V1.5 — Bandeau GSS par PNG figé + texte de section superposé ───
+// Approche image-based (abandon du clonage XML compositionnel V1.1→V1.4) : un PNG figé
+// (fond gris foncé + logo GSS, zone droite vide) injecté en haut de chaque page de section,
+// avec le numéro/titre de section écrit par-dessus dans une zone de texte flottante.
+// Rendu identique Word / LibreOffice / PDF.
+const BANDEAU_REL_ID = 'rIdBandeauGSS';
+const BANDEAU_PNG = 'bandeau_gss_header.png';
+const BANDEAU_TEXT_COLOR = '7F7124'; // doré-olive (validé par Stan)
+
+/** Paragraphe XML du bandeau : image PNG ancrée + zone de texte (numéro/titre de section). */
+function bandeauParagraphXml(line1: string, line2: string, uid: number): string {
+  const NS =
+    'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"' +
+    ' xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"' +
+    ' xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"' +
+    ' xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"' +
+    ' xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"' +
+    ' xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"' +
+    ' xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"';
+  // PNG : 17 cm × 3,5 cm, ancré relativement à la page (haut).
+  const pngAnchor =
+    '<w:r><w:rPr><w:noProof/></w:rPr><w:drawing>' +
+    '<wp:anchor distT="0" distB="0" distL="0" distR="0" simplePos="0" relativeHeight="251660288" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="1">' +
+    '<wp:simplePos x="0" y="0"/>' +
+    '<wp:positionH relativeFrom="page"><wp:posOffset>1080000</wp:posOffset></wp:positionH>' +
+    '<wp:positionV relativeFrom="page"><wp:posOffset>720000</wp:posOffset></wp:positionV>' +
+    '<wp:extent cx="6120000" cy="1260000"/><wp:effectExtent l="0" t="0" r="0" b="0"/><wp:wrapNone/>' +
+    `<wp:docPr id="${uid}" name="BandeauGSS${uid}"/><wp:cNvGraphicFramePr/>` +
+    '<a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">' +
+    `<pic:pic><pic:nvPicPr><pic:cNvPr id="${uid}" name="${BANDEAU_PNG}"/><pic:cNvPicPr/></pic:nvPicPr>` +
+    `<pic:blipFill><a:blip r:embed="${BANDEAU_REL_ID}"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill>` +
+    '<pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="6120000" cy="1260000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr>' +
+    '</pic:pic></a:graphicData></a:graphic></wp:anchor></w:drawing></w:r>';
+  // Zone de texte (numéro/titre) superposée sur la partie droite (vide) du PNG.
+  const textAnchor =
+    '<w:r><mc:AlternateContent><mc:Choice Requires="wps"><w:drawing>' +
+    '<wp:anchor distT="0" distB="0" distL="0" distR="0" simplePos="0" relativeHeight="251661312" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="1">' +
+    '<wp:simplePos x="0" y="0"/>' +
+    '<wp:positionH relativeFrom="page"><wp:posOffset>3240000</wp:posOffset></wp:positionH>' +
+    '<wp:positionV relativeFrom="page"><wp:posOffset>900000</wp:posOffset></wp:positionV>' +
+    '<wp:extent cx="3600000" cy="900000"/><wp:effectExtent l="0" t="0" r="0" b="0"/><wp:wrapNone/>' +
+    `<wp:docPr id="${uid + 1}" name="BandeauTxt${uid}"/>` +
+    '<a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">' +
+    // fond = couleur du PNG (#4A4643) → fusion visuelle sur le bandeau ET marque la zone comme
+    // "fond foncé" (fixBandeauContrast la laisse alors en texte clair, ne la repasse pas en sombre).
+    '<wps:wsp><wps:cNvSpPr txBox="1"/><wps:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="3600000" cy="900000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:solidFill><a:srgbClr val="4A4643"/></a:solidFill></wps:spPr>' +
+    '<wps:txbx><w:txbxContent>' +
+    `<w:p><w:pPr><w:spacing w:after="0" w:line="240" w:lineRule="auto"/></w:pPr><w:r><w:rPr><w:rFonts w:ascii="Trebuchet MS" w:hAnsi="Trebuchet MS"/><w:b/><w:color w:val="${BANDEAU_TEXT_COLOR}"/><w:sz w:val="40"/></w:rPr><w:t xml:space="preserve">${escXml(line1)}</w:t></w:r></w:p>` +
+    `<w:p><w:pPr><w:spacing w:after="0" w:line="240" w:lineRule="auto"/></w:pPr><w:r><w:rPr><w:rFonts w:ascii="Trebuchet MS" w:hAnsi="Trebuchet MS"/><w:b/><w:color w:val="${BANDEAU_TEXT_COLOR}"/><w:sz w:val="26"/></w:rPr><w:t xml:space="preserve">${escXml(line2)}</w:t></w:r></w:p>` +
+    '</w:txbxContent></wps:txbx>' +
+    '<wps:bodyPr rot="0" wrap="square" lIns="91440" tIns="45720" rIns="91440" bIns="45720" anchor="t"/>' +
+    '</wps:wsp></a:graphicData></a:graphic></wp:anchor></w:drawing></mc:Choice></mc:AlternateContent></w:r>';
+  return `<w:p ${NS}><w:pPr><w:spacing w:before="0" w:after="0" w:line="240" w:lineRule="auto"/></w:pPr>${pngAnchor}${textAnchor}</w:p>`;
+}
+
 // ─── Construction d'un mémoire PROPRE (XML en chaîne, zéro DOM) ───
 // On ne touche plus jamais au DOM d'AO RNE (le re-sérialiser dégrade sa maquette).
 // À la place, on génère un document.xml NEUF, dont le rendu reprend l'identité
@@ -1607,10 +1662,22 @@ Renvoie uniquement un objet JSON valide contenant les ${batchPrompts.length} val
 
     // 4. Aplatir les sections générées ; pour chacune, dupliquer la page-modèle du bon thème
     //    et y injecter titre + texte. Insertion juste après la page-modèle correspondante.
-    const flat: Array<{ title: string; text: string }> = [];
-    chapters.forEach((ch) =>
-      (ch?.sections || []).forEach((s) => { if (s?.text?.trim()) flat.push({ title: (s.title || '').trim(), text: s.text }); }),
-    );
+    const flat: Array<{ title: string; text: string; line1: string; line2: string }> = [];
+    chapters.forEach((ch, ci) => {
+      const roman = ch?.key || ['I', 'II', 'III', 'IV', 'V', 'VI'][ci] || String(ci + 1);
+      const chapTitle = (ch?.title || '').trim();
+      (ch?.sections || []).forEach((s, si) => {
+        if (s?.text?.trim()) {
+          flat.push({
+            title: (s.title || '').trim(),
+            text: s.text,
+            // V1.5 — lignes du bandeau : "I. PRÉSENTATION" + "1. NOTRE CATALOGUE…"
+            line1: `${roman}. ${chapTitle.toUpperCase()}`.trim(),
+            line2: `${si + 1}. ${(s.title || '').trim().toUpperCase()}`.trim(),
+          });
+        }
+      });
+    });
     if (flat.length === 0) throw new Error('Aucune section générée à insérer (sections vides).');
 
     const scoreMatch = (title: string, heading: string): number => {
@@ -1630,10 +1697,13 @@ Renvoie uniquement un objet JSON valide contenant les ${batchPrompts.length} val
       spreads.forEach((sp) => { const sc = scoreMatch(sec.title, sp.headingText); if (sc > bestScore) { bestScore = sc; best = sp; } });
 
       const newNodes = cloneSpread(xmlDoc, best.headingParas, best.bodyParas, counter, sec.title, sec.text, refonte, stats);
+      // V1.5 — bandeau PNG + texte de section, en TÊTE de la page de section clonée.
+      const uid = (counter.v += 2);
+      const bandeauP = parser.parseFromString(bandeauParagraphXml(sec.line1, sec.line2, uid), 'text/xml').documentElement;
       const anchorBody = best.bodyParas[best.bodyParas.length - 1];
       const ref = (lastInsertedByBody.get(anchorBody) || anchorBody).nextSibling;
       let last: any = null;
-      newNodes.forEach((n) => { body.insertBefore(n, ref); last = n; });
+      [bandeauP, ...newNodes].forEach((n) => { body.insertBefore(n, ref); last = n; });
       lastInsertedByBody.set(anchorBody, last);
       inserted++;
     });
@@ -1688,12 +1758,11 @@ Renvoie uniquement un objet JSON valide contenant les ${batchPrompts.length} val
     // 5. Sérialiser document.xml (médias conservés).
     let finalDocXml = serializer.serializeToString(xmlDoc);
 
-    // V1.3 — BANDEAU GSS sur CHAQUE page : on attache un vrai en-tête Word (header1.xml)
-    // à chaque <w:sectPr>. Un en-tête Word se répète sur toutes les pages de sa section,
-    // y compris les pages de continuation (que le bandeau inline flottant ne couvrait pas).
-    // Périmètre STRICT : n'ajoute que l'en-tête ; ne touche ni aux images ni au fond gris.
+    // V1.5 — Le bandeau de section est désormais fourni par le PNG injecté (injectBandeauPng),
+    // par-page de section. On DÉSACTIVE donc l'en-tête Word générique V1.3 (`attachSectionHeader`)
+    // pour éviter un bandeau dupliqué en haut de page. (Fonction conservée mais non appelée.)
     if (refonte) {
-      finalDocXml = this.attachSectionHeader(zip, finalDocXml);
+      this.injectBandeauPng(zip);
     }
     zip.file('word/document.xml', finalDocXml);
     const buf = zip.generate({ type: 'nodebuffer', compression: 'DEFLATE' });
@@ -1812,6 +1881,39 @@ Renvoie uniquement un objet JSON valide contenant les ${batchPrompts.length} val
     });
     console.log(`[MemoireGenerator] V1.3 bandeau : header1.xml attaché à ${injected} sectPr (logo=${hasLogo}).`);
     return out;
+  }
+
+  /**
+   * V1.5 — Injecte le PNG du bandeau dans le paquet DOCX : ajoute `word/media/bandeau_gss_header.png`
+   * et la relation `rIdBandeauGSS` (référencée par les ancres bandeau de chaque page de section).
+   * Le content-type `png` est déjà déclaré par défaut dans `[Content_Types].xml` du maître.
+   */
+  private injectBandeauPng(zip: PizZip): void {
+    const pngPath = path.join(this.templateDir, 'Mémoire technique', 'assets', BANDEAU_PNG);
+    if (!fs.existsSync(pngPath)) {
+      console.warn(`[MemoireGenerator] V1.5 : asset bandeau introuvable : ${pngPath}`);
+      return;
+    }
+    zip.file(`word/media/${BANDEAU_PNG}`, fs.readFileSync(pngPath));
+    const relsFile = zip.file('word/_rels/document.xml.rels');
+    if (relsFile) {
+      let rels = relsFile.asText();
+      if (!rels.includes(BANDEAU_REL_ID)) {
+        rels = rels.replace(/<\/Relationships>\s*$/,
+          `<Relationship Id="${BANDEAU_REL_ID}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/${BANDEAU_PNG}"/></Relationships>`);
+        zip.file('word/_rels/document.xml.rels', rels);
+      }
+    }
+    // Garantir le content-type png (le maître le déclare déjà ; sécurité).
+    const ct = zip.file('[Content_Types].xml');
+    if (ct) {
+      let c = ct.asText();
+      if (!/Extension="png"/.test(c)) {
+        c = c.replace(/(<Types[^>]*>)/, '$1<Default Extension="png" ContentType="image/png"/>');
+        zip.file('[Content_Types].xml', c);
+      }
+    }
+    console.log(`[MemoireGenerator] V1.5 : PNG bandeau injecté (${BANDEAU_PNG}) + relation ${BANDEAU_REL_ID}.`);
   }
 
   /**
