@@ -239,6 +239,170 @@ function bodyTextToLines(text: string): string[] {
     .map(l => l.trim());
 }
 
+// V1.2 — logos GSS (bandeau header) à toujours conserver.
+const HEADER_LOGOS = new Set(['image5.png', 'image2.png', 'image32.png']);
+// Seuil "photo" (les logos/filets/puces font < 40 Ko).
+const DECORATIVE_MIN_BYTES = 40000;
+
+/**
+ * V1.2 — Supprime CATÉGORIQUEMENT les blocs décoratifs "photo d'agent + légende"
+ * (« NOS AGENTS CYNOPHILES » + chien, « NOS AGENTS INCENDIE SSIAP » + extincteurs, etc.).
+ *
+ * Critère robuste, au niveau du run `<w:r>` :
+ *  - le run embarque une PHOTO > 40 Ko (hors logos `image5/2/32`) ;
+ *  - ET contient EXACTEMENT 1 légende distincte courte (`txbxContent`, ≤ 6 mots).
+ *
+ * → cible les 7 blocs décoratifs ; ÉPARGNE les logos, les fonds (`behindDoc`), les icônes,
+ *   et les DIAGRAMMES fonctionnels (plusieurs légendes : workflow appli, planning…).
+ *
+ * Retire le run + (si plus référencés) la relation rId et le fichier média.
+ */
+/** Étiquette décorative du maître (ALL-CAPS, ex. "NOS AGENTS CYNOPHILES") vs titre injecté (casse normale). */
+function isDecorativeLabel(s: string): boolean {
+  const letters = s.replace(/[^A-Za-zÀ-ÿ]/g, '');
+  return letters.length > 3 && s === s.toUpperCase();
+}
+
+/** Supprime un élément de son parent (sécurisé). */
+function removeNode(n: any): boolean {
+  if (n && n.parentNode) { n.parentNode.removeChild(n); return true; }
+  return false;
+}
+
+function removeAllDecorativeBlocks(
+  doc: any, ridToMedia: Record<string, string>, mediaSize: Record<string, number>,
+): { removedImages: string[]; removedReferences: number } {
+  const removedImages = new Set<string>();
+  let removedReferences = 0;
+  const isDecoBlip = (b: any) => {
+    const m = ridToMedia[b.getAttribute('r:embed')];
+    return !!m && !HEADER_LOGOS.has(m) && (mediaSize[m] || 0) > DECORATIVE_MIN_BYTES;
+  };
+  const runs = getElementsWithLocalName(doc.documentElement, 'r');
+  runs.forEach((r: any) => {
+    const photoBlips = getElementsWithLocalName(r, 'blip').filter(isDecoBlip);
+    if (photoBlips.length === 0) return;
+
+    // légendes distinctes courtes dans ce run
+    const caps = new Set<string>();
+    getElementsWithLocalName(r, 'txbxContent').forEach((tx: any) => {
+      const t = getElementText(tx).replace(/\s+/g, ' ').trim();
+      if (t && t.split(' ').length <= 6) caps.add(t);
+    });
+    if (caps.size !== 1) return; // 0 légende, ou diagramme multi-légendes → conserver
+
+    const caption = [...caps][0];
+    const photoMedia = photoBlips.map((b: any) => ridToMedia[b.getAttribute('r:embed')]);
+
+    if (isDecorativeLabel(caption)) {
+      // Bloc décoratif du maître ("NOS AGENTS …") → retirer le run entier (photo + légende).
+      if (removeNode(r)) { removedReferences++; photoMedia.forEach((m: string) => removedImages.add(m)); }
+    } else {
+      // Page clonée : la légende est le TITRE injecté (à conserver) → retirer SEULEMENT la photo.
+      let removedHere = false;
+      photoBlips.forEach((b: any) => { if (removeNode(getParentWithLocalName(b, 'pic'))) removedHere = true; });
+      getElementsWithLocalName(r, 'imagedata').forEach((vi: any) => {
+        const m = ridToMedia[vi.getAttribute('r:id')];
+        if (m && !HEADER_LOGOS.has(m) && (mediaSize[m] || 0) > DECORATIVE_MIN_BYTES) {
+          if (removeNode(getParentWithLocalName(vi, 'shape') || getParentWithLocalName(vi, 'rect'))) removedHere = true;
+        }
+      });
+      if (removedHere) { removedReferences++; photoMedia.forEach((m: string) => removedImages.add(m)); }
+    }
+  });
+  return { removedImages: [...removedImages], removedReferences };
+}
+
+/** Couleur sombre (luminance perçue faible) ? */
+function isDarkColor(hex: string): boolean {
+  if (!/^[0-9A-Fa-f]{6}$/.test(hex)) return false;
+  const r = parseInt(hex.slice(0, 2), 16), g = parseInt(hex.slice(2, 4), 16), b = parseInt(hex.slice(4, 6), 16);
+  return (0.299 * r + 0.587 * g + 0.114 * b) < 140;
+}
+
+/** La zone de titre (`txbxContent`) a-t-elle un fond FONCÉ (forme `wsp` à `solidFill` sombre, ou VML fillcolor sombre) ? */
+function textboxHasDarkBand(tx: any): boolean {
+  const wsp = getParentWithLocalName(tx, 'wsp');
+  if (wsp) {
+    const spPr = findLocalNameChild(wsp, 'spPr');
+    const fill = spPr ? findLocalNameChild(spPr, 'solidFill') : null;
+    const clr = fill ? findLocalNameChild(fill, 'srgbClr') : null;
+    const v = clr ? clr.getAttribute('val') : '';
+    if (v && isDarkColor(v)) return true;
+  }
+  // VML : <v:shape style fillcolor="#494545">
+  const shape = getParentWithLocalName(tx, 'shape') || getParentWithLocalName(tx, 'rect');
+  if (shape) {
+    const fc = (shape.getAttribute('fillcolor') || '').replace('#', '');
+    if (fc && isDarkColor(fc)) return true;
+  }
+  return false;
+}
+
+/**
+ * V1.2 — Rend le BANDEAU de section lisible sur CHAQUE page (cohérence master + clones).
+ * Pour chaque zone de titre (`txbxContent`) : si elle a un fond FONCÉ → on conserve la
+ * couleur d'origine (texte clair/rouge, lisible) ; sinon (texte sur fond gris) → on force
+ * le texte en sombre (`DUP_TEXT_COLOR`) pour le rendre lisible. Document-wide.
+ * Retourne le nombre de runs recolorés.
+ */
+function fixBandeauContrast(doc: any): number {
+  let recolored = 0;
+  getElementsWithLocalName(doc.documentElement, 'txbxContent').forEach((tx: any) => {
+    if (textboxHasDarkBand(tx)) return; // fond foncé → couleur claire d'origine conservée
+    getElementsWithLocalName(tx, 'r').forEach((r: any) => {
+      if (getElementsWithLocalName(r, 't').length === 0) return;
+      let rPr = findLocalNameChild(r, 'rPr');
+      if (!rPr) { rPr = r.ownerDocument.createElementNS(W_NS, 'w:rPr'); r.insertBefore(rPr, r.firstChild); }
+      let col = findLocalNameChild(rPr, 'color');
+      if (!col) { col = r.ownerDocument.createElementNS(W_NS, 'w:color'); rPr.appendChild(col); }
+      col.setAttribute('w:val', DUP_TEXT_COLOR);
+      recolored++;
+    });
+  });
+  return recolored;
+}
+
+/**
+ * V1.4 — BANDEAU INLINE fiable : le bandeau de section (« I. PRESENTATION » + sous-titre)
+ * est un `txbxContent` TRANSPARENT dont le fond foncé provenait d'une bande flottante
+ * (`behindDoc`) découplée du texte par le reflux des pages. On rend le bandeau autonome :
+ * pour chaque zone de titre courte, on ajoute une **trame de paragraphe** sombre (`w:shd`,
+ * qui suit le texte) + texte clair → bande foncée + texte clair lisible, sur chaque page,
+ * sans dépendre de l'élément flottant. Périmètre strict : ne touche QUE les `txbxContent`.
+ * Renvoie le nombre de paragraphes-bandeau traités.
+ */
+function shadeTitleBands(doc: any): number {
+  const BAND = '494545';
+  const TEXT = 'F5F5DB';
+  let n = 0;
+  getElementsWithLocalName(doc.documentElement, 'txbxContent').forEach((tx: any) => {
+    const full = getElementText(tx).replace(/\s+/g, ' ').trim();
+    if (!full || full.split(' ').length > 14) return; // titres/bandeaux courts uniquement
+    getElementsWithLocalName(tx, 'p').forEach((p: any) => {
+      if (getElementText(p).trim() === '') return;
+      let pPr = findLocalNameChild(p, 'pPr');
+      if (!pPr) { pPr = doc.createElementNS(W_NS, 'w:pPr'); p.insertBefore(pPr, p.firstChild); }
+      let shd = findLocalNameChild(pPr, 'shd');
+      if (!shd) { shd = doc.createElementNS(W_NS, 'w:shd'); pPr.appendChild(shd); }
+      shd.setAttribute('w:val', 'clear');
+      shd.setAttribute('w:color', 'auto');
+      shd.setAttribute('w:fill', BAND);
+      // texte clair lisible sur la bande foncée
+      getElementsWithLocalName(p, 'r').forEach((r: any) => {
+        if (getElementsWithLocalName(r, 't').length === 0) return;
+        let rPr = findLocalNameChild(r, 'rPr');
+        if (!rPr) { rPr = doc.createElementNS(W_NS, 'w:rPr'); r.insertBefore(rPr, r.firstChild); }
+        let col = findLocalNameChild(rPr, 'color');
+        if (!col) { col = doc.createElementNS(W_NS, 'w:color'); rPr.appendChild(col); }
+        col.setAttribute('w:val', TEXT);
+      });
+      n++;
+    });
+  });
+  return n;
+}
+
 /**
  * Refonte V1 — sur une page DUPLIQUÉE, retire les images de fond pleine page
  * "inutiles" (anchors `behindDoc="1"` porteurs d'une photo) afin de laisser
@@ -246,16 +410,30 @@ function bodyTextToLines(text: string): string[] {
  * PAS de zone de titre (`txbxContent`) : le bandeau d'en-tête / titre est toujours
  * conservé. Renvoie le nombre de runs-images retirés.
  */
+// V1.4 — un fond est PLEINE PAGE si l'ancrage `behindDoc` a une hauteur ≈ page (~10,7 M EMU).
+// La BANDE du bandeau (logo GSS image5/32) a une ancre pleine largeur mais COURTE (~1,19 M EMU)
+// → on la préserve. Seuil entre les deux : 5 M EMU.
+const FULL_PAGE_MIN_CY = 5_000_000;
+
 function stripStandaloneBgImages(paras: any[]): number {
   let removed = 0;
   paras.forEach((p) => {
     const runs = getElementsWithLocalName(p, 'r');
     runs.forEach((r: any) => {
-      const anchors = getElementsWithLocalName(r, 'anchor');
-      const isFullPageBg = anchors.some((a: any) => a.getAttribute('behindDoc') === '1');
+      const bgAnchors = getElementsWithLocalName(r, 'anchor').filter(
+        (a: any) => a.getAttribute('behindDoc') === '1',
+      );
+      if (bgAnchors.length === 0) return;
       const hasBlip = getElementsWithLocalName(r, 'blip').length > 0;
       const hasTitle = getElementsWithLocalName(r, 'txbxContent').length > 0;
-      if (isFullPageBg && hasBlip && !hasTitle && r.parentNode) {
+      if (!hasBlip || hasTitle) return;
+      // V1.4 : ne retirer QUE les fonds pleine page ; préserver la BANDE du bandeau (courte).
+      const isFullPageBg = bgAnchors.some((a: any) => {
+        const ext = findLocalNameChild(a, 'extent');
+        const cy = ext ? parseInt(ext.getAttribute('cy') || '0', 10) : 0;
+        return cy >= FULL_PAGE_MIN_CY;
+      });
+      if (isFullPageBg && r.parentNode) {
         r.parentNode.removeChild(r);
         removed++;
       }
@@ -264,12 +442,19 @@ function stripStandaloneBgImages(paras: any[]): number {
   return removed;
 }
 
-/** Force la couleur de tous les runs (texte) d'un sous-arbre — lisibilité sur fond gris. */
+/**
+ * Force la couleur des runs (texte) d'un sous-arbre — lisibilité sur fond gris.
+ * V1.2 : on ÉPARGNE les bandeaux de titre (`txbxContent`, ex. "I. PRESENTATION",
+ * "NOS AGENTS …") dont le fond est foncé — y forcer un texte sombre le rendrait
+ * invisible. Le corps (hors `txbxContent`) reste forcé en sombre (lisible sur le gris).
+ */
 function forceTextColor(paras: any[], color: string) {
   paras.forEach((p) => {
     getElementsWithLocalName(p, 'r').forEach((r: any) => {
       // ne pas toucher aux runs purement graphiques (drawing/pict) sans texte
       if (getElementsWithLocalName(r, 't').length === 0) return;
+      // bandeau de titre → conserver la couleur claire d'origine (lisible sur fond foncé)
+      if (getParentWithLocalName(r, 'txbxContent')) return;
       let rPr = findLocalNameChild(r, 'rPr');
       if (!rPr) {
         rPr = r.ownerDocument.createElementNS(W_NS, 'w:rPr');
@@ -1507,27 +1692,185 @@ Renvoie uniquement un objet JSON valide contenant les ${batchPrompts.length} val
       inserted++;
     });
 
-    // 5. Sérialiser document.xml (médias conservés) et sauvegarder.
-    zip.file('word/document.xml', serializer.serializeToString(xmlDoc));
+    // 4bis. V1.2 — suppression catégorique des blocs décoratifs "photo agent + légende"
+    //       sur tout le document (pages maître ET pages clonées), en une passe.
+    let decoImages: string[] = [];
+    let decoRefs = 0;
+    if (refonte) {
+      const relsFile = zip.file('word/_rels/document.xml.rels');
+      const ridToMedia: Record<string, any> = {};
+      if (relsFile) {
+        const relsTxt = relsFile.asText();
+        for (const m of relsTxt.matchAll(/Id="(rId\d+)"[^>]*Target="(media\/[^"]+)"/g)) {
+          ridToMedia[m[1]] = m[2].split('/').pop();
+        }
+      }
+      const mediaSize: Record<string, number> = {};
+      Object.keys(zip.files).filter((n) => n.startsWith('word/media/')).forEach((n) => {
+        mediaSize[n.split('/').pop() as string] = zip.file(n)!.asUint8Array().length;
+      });
+      const res = removeAllDecorativeBlocks(xmlDoc, ridToMedia, mediaSize);
+      decoImages = res.removedImages;
+      decoRefs = res.removedReferences;
+
+      // V1.2 — bandeau de section lisible sur chaque page (master + clones).
+      const recolored = fixBandeauContrast(xmlDoc);
+      console.log(`[MemoireGenerator] V1.2 bandeau : ${recolored} run(s) de titre recoloré(s) pour lisibilité.`);
+
+      // V1.4 — BANDEAU INLINE autonome : trame de paragraphe sombre + texte clair sur les
+      // zones de titre (indépendant de la bande flottante découplée par le reflux).
+      const banded = shadeTitleBands(xmlDoc);
+      console.log(`[MemoireGenerator] V1.4 bandeau inline : ${banded} paragraphe(s) de titre tramé(s).`);
+
+      // Purge des relations + fichiers média devenus orphelins (les images retirées ne sont
+      // plus référencées nulle part dans document.xml après suppression des runs).
+      const stillReferenced = new Set(
+        (serializer.serializeToString(xmlDoc).match(/r:(?:embed|id)="(rId\d+)"/g) || [])
+          .map((s) => s.replace(/.*"(rId\d+)".*/, '$1')),
+      );
+      if (relsFile) {
+        let relsTxt = relsFile.asText();
+        for (const img of decoImages) {
+          // rIds pointant vers cette image et qui ne sont plus référencés
+          for (const m of [...relsTxt.matchAll(new RegExp(`Id="(rId\\d+)"[^>]*Target="media/${img.replace(/\./g, '\\.')}"`, 'g'))]) {
+            if (!stillReferenced.has(m[1])) {
+              relsTxt = relsTxt.replace(new RegExp(`<Relationship Id="${m[1]}"[^>]*/>`, 'g'), '');
+            }
+          }
+          const mediaPath = `word/media/${img}`;
+          if (zip.file(mediaPath)) delete (zip as any).files[mediaPath];
+        }
+        zip.file('word/_rels/document.xml.rels', relsTxt);
+      }
+    }
+
+    // 5. Sérialiser document.xml (médias conservés).
+    let finalDocXml = serializer.serializeToString(xmlDoc);
+
+    // V1.3 — BANDEAU GSS sur CHAQUE page : on attache un vrai en-tête Word (header1.xml)
+    // à chaque <w:sectPr>. Un en-tête Word se répète sur toutes les pages de sa section,
+    // y compris les pages de continuation (que le bandeau inline flottant ne couvrait pas).
+    // Périmètre STRICT : n'ajoute que l'en-tête ; ne touche ni aux images ni au fond gris.
+    if (refonte) {
+      finalDocXml = this.attachSectionHeader(zip, finalDocXml);
+    }
+    zip.file('word/document.xml', finalDocXml);
     const buf = zip.generate({ type: 'nodebuffer', compression: 'DEFLATE' });
     const outputFileName = `Mémoire technique GSS_${Date.now()}.docx`;
     const outputPath = path.join(this.responseDir, outputFileName);
     fs.writeFileSync(outputPath, buf);
 
-    console.log(`[MemoireGenerator] AO RNE personnalisé : ${inserted} page(s) ajoutée(s), ${spreads.length} page(s)-modèle, refonte=${refonte} (fond gris ${refonte ? BACKGROUND_COLOR : 'off'}, ${stats.imagesRemoved} image(s) de fond retirée(s)), client="${clientName || '(non personnalisé)'}" → ${outputPath}`);
+    console.log(`[MemoireGenerator] AO RNE personnalisé : ${inserted} page(s) ajoutée(s), ${spreads.length} page(s)-modèle, refonte=${refonte} (fond gris ${refonte ? BACKGROUND_COLOR : 'off'}, ${stats.imagesRemoved} image(s) de fond retirée(s), ${decoRefs} bloc(s) décoratif(s) retiré(s): ${decoImages.join(', ') || 'aucun'}), client="${clientName || '(non personnalisé)'}" → ${outputPath}`);
 
     return {
       filePath: outputPath,
       generatedData: {
         mode: refonte
-          ? `Refonte V1 : fond gris uniforme #${BACKGROUND_COLOR} + bandeau conservé + images de fond retirées des pages dupliquées`
+          ? `Refonte V1.2 : fond gris #${BACKGROUND_COLOR} + bandeau lisible + blocs décoratifs retirés`
           : 'AO RNE préservé (design intact) + pages dupliquées',
         client: clientName || '(non personnalisé)',
         pages_ajoutees: String(inserted),
         pages_modeles: String(spreads.length),
         images_fond_retirees: String(stats.imagesRemoved),
+        blocs_decoratifs_retires: String(decoRefs),
+        images_decoratives: decoImages.join(', '),
+        bandeau_header: 'word/header1.xml (headerReference sur chaque sectPr)',
       },
     };
+  }
+
+  /**
+   * V1.3 — Attache un BANDEAU GSS (vrai en-tête Word) à chaque section.
+   * Crée `word/header1.xml` (bande sombre + logo GSS `image5.png` + texte clair), sa relation
+   * image, l'override Content_Types, la relation document→header, et injecte un
+   * `<w:headerReference w:type="default">` dans chaque `<w:sectPr>` (+ marge d'en-tête).
+   * Un en-tête Word se répète sur TOUTES les pages de sa section. Renvoie le document.xml modifié.
+   * Périmètre strict : ne touche QUE l'en-tête (aucune image/contenu/fond modifié).
+   */
+  private attachSectionHeader(zip: PizZip, docXml: string): string {
+    const HDR_REL = 'rIdGssBandeau';
+    const BAND = '494545';   // bande sombre du bandeau
+    const TEXT = 'F5F5DB';   // texte clair (identité AO RNE)
+
+    // 1. rId du logo GSS (image5.png) dans les relations du document — réutilisé pour le header.
+    const docRelsFile = zip.file('word/_rels/document.xml.rels');
+    const relsTxt = docRelsFile ? docRelsFile.asText() : '';
+    const logoMatch = relsTxt.match(/Id="(rId\d+)"[^>]*Target="media\/image5\.png"/);
+    const hasLogo = !!logoMatch && !!zip.file('word/media/image5.png');
+
+    // 2. header1.xml : bande sombre (w:shd) + logo inline + titre clair.
+    const cx = 900000, cy = Math.round(cx * 80 / 153); // ratio logo 153×80
+    const logoRun = hasLogo
+      ? '<w:r><w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0">' +
+        `<wp:extent cx="${cx}" cy="${cy}"/><wp:effectExtent l="0" t="0" r="0" b="0"/>` +
+        '<wp:docPr id="970" name="LogoGSSBandeau"/>' +
+        '<wp:cNvGraphicFramePr><a:graphicFrameLocks noChangeAspect="1"/></wp:cNvGraphicFramePr>' +
+        '<a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">' +
+        '<pic:pic><pic:nvPicPr><pic:cNvPr id="970" name="LogoGSSBandeau"/><pic:cNvPicPr/></pic:nvPicPr>' +
+        '<pic:blipFill><a:blip r:embed="rId1"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill>' +
+        `<pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="${cx}" cy="${cy}"/></a:xfrm>` +
+        '<a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic>' +
+        '</a:graphicData></a:graphic></wp:inline></w:drawing></w:r>'
+      : '';
+    const headerXml =
+      '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+      '<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"' +
+      ' xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"' +
+      ' xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"' +
+      ' xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"' +
+      ' xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">' +
+      '<w:p><w:pPr>' +
+      `<w:shd w:val="clear" w:color="auto" w:fill="${BAND}"/>` +
+      '<w:spacing w:before="40" w:after="40" w:line="240" w:lineRule="auto"/>' +
+      '<w:jc w:val="left"/>' +
+      `<w:rPr><w:rFonts w:ascii="Trebuchet MS" w:hAnsi="Trebuchet MS"/><w:b/><w:color w:val="${TEXT}"/><w:sz w:val="26"/></w:rPr>` +
+      '</w:pPr>' +
+      logoRun +
+      `<w:r><w:rPr><w:rFonts w:ascii="Trebuchet MS" w:hAnsi="Trebuchet MS"/><w:b/><w:color w:val="${TEXT}"/><w:sz w:val="26"/></w:rPr>` +
+      '<w:t xml:space="preserve">   MÉMOIRE TECHNIQUE — GSS</w:t></w:r>' +
+      '</w:p></w:hdr>';
+    zip.file('word/header1.xml', headerXml);
+
+    // 3. relations du header → logo image5.png.
+    zip.file('word/_rels/header1.xml.rels',
+      '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+      '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+      (hasLogo ? '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/image5.png"/>' : '') +
+      '</Relationships>');
+
+    // 4. relation document → header.
+    if (docRelsFile && !relsTxt.includes(HDR_REL)) {
+      const r = relsTxt.replace(/<\/Relationships>\s*$/,
+        `<Relationship Id="${HDR_REL}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header1.xml"/></Relationships>`);
+      zip.file('word/_rels/document.xml.rels', r);
+    }
+
+    // 5. override Content_Types pour header1.xml.
+    const ct = zip.file('[Content_Types].xml');
+    if (ct) {
+      let c = ct.asText();
+      if (!c.includes('header1.xml')) {
+        c = c.replace(/<\/Types>\s*$/,
+          '<Override PartName="/word/header1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"/></Types>');
+        zip.file('[Content_Types].xml', c);
+      }
+    }
+
+    // 6. injecter <w:headerReference> dans chaque <w:sectPr> qui n'en a pas (1er enfant).
+    let injected = 0;
+    let out = docXml.replace(/<w:sectPr\b([^>]*)>/g, (full, attrs) => {
+      injected++;
+      return `<w:sectPr${attrs}><w:headerReference w:type="default" r:id="${HDR_REL}"/>`;
+    });
+    // 7. garantir une marge d'en-tête (position du bandeau) sans toucher à la marge haute
+    //    du contenu (périmètre strict : on ne décale pas la pagination du corps).
+    out = out.replace(/<w:pgMar\b([^>]*)\/>/g, (_full, attrs) => {
+      let a = attrs.replace(/\sw:header="\d+"/, ' w:header="284"');
+      if (!/w:header=/.test(a)) a += ' w:header="284"';
+      return `<w:pgMar${a}/>`;
+    });
+    console.log(`[MemoireGenerator] V1.3 bandeau : header1.xml attaché à ${injected} sectPr (logo=${hasLogo}).`);
+    return out;
   }
 
   /**
