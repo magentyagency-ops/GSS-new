@@ -1685,8 +1685,17 @@ Renvoie uniquement un objet JSON valide contenant les ${batchPrompts.length} val
       }
     }
 
-    // 5. Sérialiser document.xml (médias conservés) et sauvegarder.
-    zip.file('word/document.xml', serializer.serializeToString(xmlDoc));
+    // 5. Sérialiser document.xml (médias conservés).
+    let finalDocXml = serializer.serializeToString(xmlDoc);
+
+    // V1.3 — BANDEAU GSS sur CHAQUE page : on attache un vrai en-tête Word (header1.xml)
+    // à chaque <w:sectPr>. Un en-tête Word se répète sur toutes les pages de sa section,
+    // y compris les pages de continuation (que le bandeau inline flottant ne couvrait pas).
+    // Périmètre STRICT : n'ajoute que l'en-tête ; ne touche ni aux images ni au fond gris.
+    if (refonte) {
+      finalDocXml = this.attachSectionHeader(zip, finalDocXml);
+    }
+    zip.file('word/document.xml', finalDocXml);
     const buf = zip.generate({ type: 'nodebuffer', compression: 'DEFLATE' });
     const outputFileName = `Mémoire technique GSS_${Date.now()}.docx`;
     const outputPath = path.join(this.responseDir, outputFileName);
@@ -1706,8 +1715,103 @@ Renvoie uniquement un objet JSON valide contenant les ${batchPrompts.length} val
         images_fond_retirees: String(stats.imagesRemoved),
         blocs_decoratifs_retires: String(decoRefs),
         images_decoratives: decoImages.join(', '),
+        bandeau_header: 'word/header1.xml (headerReference sur chaque sectPr)',
       },
     };
+  }
+
+  /**
+   * V1.3 — Attache un BANDEAU GSS (vrai en-tête Word) à chaque section.
+   * Crée `word/header1.xml` (bande sombre + logo GSS `image5.png` + texte clair), sa relation
+   * image, l'override Content_Types, la relation document→header, et injecte un
+   * `<w:headerReference w:type="default">` dans chaque `<w:sectPr>` (+ marge d'en-tête).
+   * Un en-tête Word se répète sur TOUTES les pages de sa section. Renvoie le document.xml modifié.
+   * Périmètre strict : ne touche QUE l'en-tête (aucune image/contenu/fond modifié).
+   */
+  private attachSectionHeader(zip: PizZip, docXml: string): string {
+    const HDR_REL = 'rIdGssBandeau';
+    const BAND = '494545';   // bande sombre du bandeau
+    const TEXT = 'F5F5DB';   // texte clair (identité AO RNE)
+
+    // 1. rId du logo GSS (image5.png) dans les relations du document — réutilisé pour le header.
+    const docRelsFile = zip.file('word/_rels/document.xml.rels');
+    const relsTxt = docRelsFile ? docRelsFile.asText() : '';
+    const logoMatch = relsTxt.match(/Id="(rId\d+)"[^>]*Target="media\/image5\.png"/);
+    const hasLogo = !!logoMatch && !!zip.file('word/media/image5.png');
+
+    // 2. header1.xml : bande sombre (w:shd) + logo inline + titre clair.
+    const cx = 900000, cy = Math.round(cx * 80 / 153); // ratio logo 153×80
+    const logoRun = hasLogo
+      ? '<w:r><w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0">' +
+        `<wp:extent cx="${cx}" cy="${cy}"/><wp:effectExtent l="0" t="0" r="0" b="0"/>` +
+        '<wp:docPr id="970" name="LogoGSSBandeau"/>' +
+        '<wp:cNvGraphicFramePr><a:graphicFrameLocks noChangeAspect="1"/></wp:cNvGraphicFramePr>' +
+        '<a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">' +
+        '<pic:pic><pic:nvPicPr><pic:cNvPr id="970" name="LogoGSSBandeau"/><pic:cNvPicPr/></pic:nvPicPr>' +
+        '<pic:blipFill><a:blip r:embed="rId1"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill>' +
+        `<pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="${cx}" cy="${cy}"/></a:xfrm>` +
+        '<a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic>' +
+        '</a:graphicData></a:graphic></wp:inline></w:drawing></w:r>'
+      : '';
+    const headerXml =
+      '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+      '<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"' +
+      ' xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"' +
+      ' xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"' +
+      ' xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"' +
+      ' xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">' +
+      '<w:p><w:pPr>' +
+      `<w:shd w:val="clear" w:color="auto" w:fill="${BAND}"/>` +
+      '<w:spacing w:before="40" w:after="40" w:line="240" w:lineRule="auto"/>' +
+      '<w:jc w:val="left"/>' +
+      `<w:rPr><w:rFonts w:ascii="Trebuchet MS" w:hAnsi="Trebuchet MS"/><w:b/><w:color w:val="${TEXT}"/><w:sz w:val="26"/></w:rPr>` +
+      '</w:pPr>' +
+      logoRun +
+      `<w:r><w:rPr><w:rFonts w:ascii="Trebuchet MS" w:hAnsi="Trebuchet MS"/><w:b/><w:color w:val="${TEXT}"/><w:sz w:val="26"/></w:rPr>` +
+      '<w:t xml:space="preserve">   MÉMOIRE TECHNIQUE — GSS</w:t></w:r>' +
+      '</w:p></w:hdr>';
+    zip.file('word/header1.xml', headerXml);
+
+    // 3. relations du header → logo image5.png.
+    zip.file('word/_rels/header1.xml.rels',
+      '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+      '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+      (hasLogo ? '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/image5.png"/>' : '') +
+      '</Relationships>');
+
+    // 4. relation document → header.
+    if (docRelsFile && !relsTxt.includes(HDR_REL)) {
+      const r = relsTxt.replace(/<\/Relationships>\s*$/,
+        `<Relationship Id="${HDR_REL}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header1.xml"/></Relationships>`);
+      zip.file('word/_rels/document.xml.rels', r);
+    }
+
+    // 5. override Content_Types pour header1.xml.
+    const ct = zip.file('[Content_Types].xml');
+    if (ct) {
+      let c = ct.asText();
+      if (!c.includes('header1.xml')) {
+        c = c.replace(/<\/Types>\s*$/,
+          '<Override PartName="/word/header1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"/></Types>');
+        zip.file('[Content_Types].xml', c);
+      }
+    }
+
+    // 6. injecter <w:headerReference> dans chaque <w:sectPr> qui n'en a pas (1er enfant).
+    let injected = 0;
+    let out = docXml.replace(/<w:sectPr\b([^>]*)>/g, (full, attrs) => {
+      injected++;
+      return `<w:sectPr${attrs}><w:headerReference w:type="default" r:id="${HDR_REL}"/>`;
+    });
+    // 7. garantir une marge d'en-tête (position du bandeau) sans toucher à la marge haute
+    //    du contenu (périmètre strict : on ne décale pas la pagination du corps).
+    out = out.replace(/<w:pgMar\b([^>]*)\/>/g, (_full, attrs) => {
+      let a = attrs.replace(/\sw:header="\d+"/, ' w:header="284"');
+      if (!/w:header=/.test(a)) a += ' w:header="284"';
+      return `<w:pgMar${a}/>`;
+    });
+    console.log(`[MemoireGenerator] V1.3 bandeau : header1.xml attaché à ${injected} sectPr (logo=${hasLogo}).`);
+    return out;
   }
 
   /**
