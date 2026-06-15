@@ -364,76 +364,22 @@ function fixBandeauContrast(doc: any): number {
 }
 
 /**
- * V1.4 — BANDEAU INLINE fiable : le bandeau de section (« I. PRESENTATION » + sous-titre)
- * est un `txbxContent` TRANSPARENT dont le fond foncé provenait d'une bande flottante
- * (`behindDoc`) découplée du texte par le reflux des pages. On rend le bandeau autonome :
- * pour chaque zone de titre courte, on ajoute une **trame de paragraphe** sombre (`w:shd`,
- * qui suit le texte) + texte clair → bande foncée + texte clair lisible, sur chaque page,
- * sans dépendre de l'élément flottant. Périmètre strict : ne touche QUE les `txbxContent`.
- * Renvoie le nombre de paragraphes-bandeau traités.
- */
-function shadeTitleBands(doc: any): number {
-  const BAND = '494545';
-  const TEXT = 'F5F5DB';
-  let n = 0;
-  getElementsWithLocalName(doc.documentElement, 'txbxContent').forEach((tx: any) => {
-    const full = getElementText(tx).replace(/\s+/g, ' ').trim();
-    if (!full || full.split(' ').length > 14) return; // titres/bandeaux courts uniquement
-    getElementsWithLocalName(tx, 'p').forEach((p: any) => {
-      if (getElementText(p).trim() === '') return;
-      let pPr = findLocalNameChild(p, 'pPr');
-      if (!pPr) { pPr = doc.createElementNS(W_NS, 'w:pPr'); p.insertBefore(pPr, p.firstChild); }
-      let shd = findLocalNameChild(pPr, 'shd');
-      if (!shd) { shd = doc.createElementNS(W_NS, 'w:shd'); pPr.appendChild(shd); }
-      shd.setAttribute('w:val', 'clear');
-      shd.setAttribute('w:color', 'auto');
-      shd.setAttribute('w:fill', BAND);
-      // texte clair lisible sur la bande foncée
-      getElementsWithLocalName(p, 'r').forEach((r: any) => {
-        if (getElementsWithLocalName(r, 't').length === 0) return;
-        let rPr = findLocalNameChild(r, 'rPr');
-        if (!rPr) { rPr = doc.createElementNS(W_NS, 'w:rPr'); r.insertBefore(rPr, r.firstChild); }
-        let col = findLocalNameChild(rPr, 'color');
-        if (!col) { col = doc.createElementNS(W_NS, 'w:color'); rPr.appendChild(col); }
-        col.setAttribute('w:val', TEXT);
-      });
-      n++;
-    });
-  });
-  return n;
-}
-
-/**
  * Refonte V1 — sur une page DUPLIQUÉE, retire les images de fond pleine page
  * "inutiles" (anchors `behindDoc="1"` porteurs d'une photo) afin de laisser
  * apparaître le fond gris uniforme. On NE retire QUE les runs qui ne contiennent
  * PAS de zone de titre (`txbxContent`) : le bandeau d'en-tête / titre est toujours
  * conservé. Renvoie le nombre de runs-images retirés.
  */
-// V1.4 — un fond est PLEINE PAGE si l'ancrage `behindDoc` a une hauteur ≈ page (~10,7 M EMU).
-// La BANDE du bandeau (logo GSS image5/32) a une ancre pleine largeur mais COURTE (~1,19 M EMU)
-// → on la préserve. Seuil entre les deux : 5 M EMU.
-const FULL_PAGE_MIN_CY = 5_000_000;
-
 function stripStandaloneBgImages(paras: any[]): number {
   let removed = 0;
   paras.forEach((p) => {
     const runs = getElementsWithLocalName(p, 'r');
     runs.forEach((r: any) => {
-      const bgAnchors = getElementsWithLocalName(r, 'anchor').filter(
-        (a: any) => a.getAttribute('behindDoc') === '1',
-      );
-      if (bgAnchors.length === 0) return;
+      const anchors = getElementsWithLocalName(r, 'anchor');
+      const isFullPageBg = anchors.some((a: any) => a.getAttribute('behindDoc') === '1');
       const hasBlip = getElementsWithLocalName(r, 'blip').length > 0;
       const hasTitle = getElementsWithLocalName(r, 'txbxContent').length > 0;
-      if (!hasBlip || hasTitle) return;
-      // V1.4 : ne retirer QUE les fonds pleine page ; préserver la BANDE du bandeau (courte).
-      const isFullPageBg = bgAnchors.some((a: any) => {
-        const ext = findLocalNameChild(a, 'extent');
-        const cy = ext ? parseInt(ext.getAttribute('cy') || '0', 10) : 0;
-        return cy >= FULL_PAGE_MIN_CY;
-      });
-      if (isFullPageBg && r.parentNode) {
+      if (isFullPageBg && hasBlip && !hasTitle && r.parentNode) {
         r.parentNode.removeChild(r);
         removed++;
       }
@@ -1716,11 +1662,6 @@ Renvoie uniquement un objet JSON valide contenant les ${batchPrompts.length} val
       // V1.2 — bandeau de section lisible sur chaque page (master + clones).
       const recolored = fixBandeauContrast(xmlDoc);
       console.log(`[MemoireGenerator] V1.2 bandeau : ${recolored} run(s) de titre recoloré(s) pour lisibilité.`);
-
-      // V1.4 — BANDEAU INLINE autonome : trame de paragraphe sombre + texte clair sur les
-      // zones de titre (indépendant de la bande flottante découplée par le reflux).
-      const banded = shadeTitleBands(xmlDoc);
-      console.log(`[MemoireGenerator] V1.4 bandeau inline : ${banded} paragraphe(s) de titre tramé(s).`);
 
       // Purge des relations + fichiers média devenus orphelins (les images retirées ne sont
       // plus référencées nulle part dans document.xml après suppression des runs).
