@@ -547,19 +547,10 @@ function bandeauParagraphXml(line1: string, line2: string, uid: number): string 
     ' xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"' +
     ' xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"';
   // PNG : 17 cm × 3,5 cm, ancré relativement à la page (haut).
-  const pngAnchor =
-    '<w:r><w:rPr><w:noProof/></w:rPr><w:drawing>' +
-    '<wp:anchor distT="0" distB="0" distL="0" distR="0" simplePos="0" relativeHeight="251660288" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="1">' +
-    '<wp:simplePos x="0" y="0"/>' +
-    '<wp:positionH relativeFrom="page"><wp:posOffset>1080000</wp:posOffset></wp:positionH>' +
-    '<wp:positionV relativeFrom="page"><wp:posOffset>720000</wp:posOffset></wp:positionV>' +
-    '<wp:extent cx="6120000" cy="1260000"/><wp:effectExtent l="0" t="0" r="0" b="0"/><wp:wrapNone/>' +
-    `<wp:docPr id="${uid}" name="BandeauGSS${uid}"/><wp:cNvGraphicFramePr/>` +
-    '<a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">' +
-    `<pic:pic><pic:nvPicPr><pic:cNvPr id="${uid}" name="${BANDEAU_PNG}"/><pic:cNvPicPr/></pic:nvPicPr>` +
-    `<pic:blipFill><a:blip r:embed="${BANDEAU_REL_ID}"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill>` +
-    '<pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="6120000" cy="1260000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr>' +
-    '</pic:pic></a:graphicData></a:graphic></wp:anchor></w:drawing></w:r>';
+  // V1.6 — le PNG du bandeau est désormais dans l'EN-TÊTE Word (header1.xml, répété sur chaque
+  // page). On ne garde ici QUE la zone de texte (numéro/titre de section) ; plus d'ancre PNG inline.
+  void uid;
+  const pngAnchor = '';
   // Zone de texte (numéro/titre) superposée sur la partie droite (vide) du PNG.
   const textAnchor =
     '<w:r><mc:AlternateContent><mc:Choice Requires="wps"><w:drawing>' +
@@ -1556,13 +1547,18 @@ Renvoie uniquement un objet JSON valide contenant les ${batchPrompts.length} val
 
     // 8. Serialize and save
     const serializer = new XMLSerializer();
-    zip.file('word/document.xml', serializer.serializeToString(xmlDoc));
+    // V1.6 — bandeau GSS sur CHAQUE page (Mode A « Générer le mémoire ») : on injecte le PNG
+    // bandeau dans un en-tête Word natif (header1.xml) attaché à chaque <w:sectPr>. Word le
+    // répète sur toutes les pages, y compris les pages de continuation qui en étaient dépourvues.
+    this.injectBandeauPng(zip);
+    const finalDocXml = this.attachSectionHeader(zip, serializer.serializeToString(xmlDoc));
+    zip.file('word/document.xml', finalDocXml);
     const buf = zip.generate({ type: 'nodebuffer', compression: 'DEFLATE' });
     const outputFileName = `Mémoire technique GSS_${Date.now()}.docx`;
     const outputPath = path.join(this.responseDir, outputFileName);
     fs.writeFileSync(outputPath, buf);
 
-    console.log(`[MemoireGenerator] Successfully generated ${outputPath}`);
+    console.log(`[MemoireGenerator] Successfully generated ${outputPath} (bandeau header V1.6 appliqué)`);
 
     return {
       filePath: outputPath,
@@ -1758,11 +1754,12 @@ Renvoie uniquement un objet JSON valide contenant les ${batchPrompts.length} val
     // 5. Sérialiser document.xml (médias conservés).
     let finalDocXml = serializer.serializeToString(xmlDoc);
 
-    // V1.5 — Le bandeau de section est désormais fourni par le PNG injecté (injectBandeauPng),
-    // par-page de section. On DÉSACTIVE donc l'en-tête Word générique V1.3 (`attachSectionHeader`)
-    // pour éviter un bandeau dupliqué en haut de page. (Fonction conservée mais non appelée.)
+    // V1.6 — bandeau PNG dans un EN-TÊTE Word natif (header1.xml) attaché à chaque <w:sectPr> :
+    // Word le répète sur TOUTES les pages de section, y compris les pages de continuation.
+    // (Remplace l'ancrage inline V1.5 qui ne tombait que sur la page de début de section.)
     if (refonte) {
-      this.injectBandeauPng(zip);
+      this.injectBandeauPng(zip);                       // PNG dans word/media/
+      finalDocXml = this.attachSectionHeader(zip, finalDocXml); // header1.xml PNG + headerReference/sectPr
     }
     zip.file('word/document.xml', finalDocXml);
     const buf = zip.generate({ type: 'nodebuffer', compression: 'DEFLATE' });
@@ -1799,29 +1796,16 @@ Renvoie uniquement un objet JSON valide contenant les ${batchPrompts.length} val
    */
   private attachSectionHeader(zip: PizZip, docXml: string): string {
     const HDR_REL = 'rIdGssBandeau';
-    const BAND = '494545';   // bande sombre du bandeau
-    const TEXT = 'F5F5DB';   // texte clair (identité AO RNE)
 
-    // 1. rId du logo GSS (image5.png) dans les relations du document — réutilisé pour le header.
+    // 1. V1.6 — s'assurer que le PNG du bandeau est dans le paquet.
     const docRelsFile = zip.file('word/_rels/document.xml.rels');
     const relsTxt = docRelsFile ? docRelsFile.asText() : '';
-    const logoMatch = relsTxt.match(/Id="(rId\d+)"[^>]*Target="media\/image5\.png"/);
-    const hasLogo = !!logoMatch && !!zip.file('word/media/image5.png');
+    const pngPath = path.join(this.templateDir, 'Mémoire technique', 'assets', BANDEAU_PNG);
+    if (fs.existsSync(pngPath) && !zip.file(`word/media/${BANDEAU_PNG}`)) {
+      zip.file(`word/media/${BANDEAU_PNG}`, fs.readFileSync(pngPath));
+    }
 
-    // 2. header1.xml : bande sombre (w:shd) + logo inline + titre clair.
-    const cx = 900000, cy = Math.round(cx * 80 / 153); // ratio logo 153×80
-    const logoRun = hasLogo
-      ? '<w:r><w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0">' +
-        `<wp:extent cx="${cx}" cy="${cy}"/><wp:effectExtent l="0" t="0" r="0" b="0"/>` +
-        '<wp:docPr id="970" name="LogoGSSBandeau"/>' +
-        '<wp:cNvGraphicFramePr><a:graphicFrameLocks noChangeAspect="1"/></wp:cNvGraphicFramePr>' +
-        '<a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">' +
-        '<pic:pic><pic:nvPicPr><pic:cNvPr id="970" name="LogoGSSBandeau"/><pic:cNvPicPr/></pic:nvPicPr>' +
-        '<pic:blipFill><a:blip r:embed="rId1"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill>' +
-        `<pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="${cx}" cy="${cy}"/></a:xfrm>` +
-        '<a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic>' +
-        '</a:graphicData></a:graphic></wp:inline></w:drawing></w:r>'
-      : '';
+    // 2. V1.6 — header1.xml : le PNG bandeau (17×3,5 cm) inline, répété sur chaque page.
     const headerXml =
       '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
       '<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"' +
@@ -1829,24 +1813,26 @@ Renvoie uniquement un objet JSON valide contenant les ${batchPrompts.length} val
       ' xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"' +
       ' xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"' +
       ' xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">' +
-      '<w:p><w:pPr>' +
-      `<w:shd w:val="clear" w:color="auto" w:fill="${BAND}"/>` +
-      '<w:spacing w:before="40" w:after="40" w:line="240" w:lineRule="auto"/>' +
-      '<w:jc w:val="left"/>' +
-      `<w:rPr><w:rFonts w:ascii="Trebuchet MS" w:hAnsi="Trebuchet MS"/><w:b/><w:color w:val="${TEXT}"/><w:sz w:val="26"/></w:rPr>` +
-      '</w:pPr>' +
-      logoRun +
-      `<w:r><w:rPr><w:rFonts w:ascii="Trebuchet MS" w:hAnsi="Trebuchet MS"/><w:b/><w:color w:val="${TEXT}"/><w:sz w:val="26"/></w:rPr>` +
-      '<w:t xml:space="preserve">   MÉMOIRE TECHNIQUE — GSS</w:t></w:r>' +
+      '<w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="240" w:lineRule="auto"/></w:pPr>' +
+      '<w:r><w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0">' +
+      '<wp:extent cx="6120000" cy="1260000"/><wp:effectExtent l="0" t="0" r="0" b="0"/>' +
+      '<wp:docPr id="200" name="BandeauHeader"/>' +
+      '<wp:cNvGraphicFramePr><a:graphicFrameLocks noChangeAspect="1"/></wp:cNvGraphicFramePr>' +
+      '<a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">' +
+      `<pic:pic><pic:nvPicPr><pic:cNvPr id="200" name="${BANDEAU_PNG}"/><pic:cNvPicPr/></pic:nvPicPr>` +
+      '<pic:blipFill><a:blip r:embed="rId1"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill>' +
+      '<pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="6120000" cy="1260000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr>' +
+      '</pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>' +
       '</w:p></w:hdr>';
     zip.file('word/header1.xml', headerXml);
 
-    // 3. relations du header → logo image5.png.
+    // 3. relations du header → PNG bandeau.
     zip.file('word/_rels/header1.xml.rels',
       '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
       '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
-      (hasLogo ? '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/image5.png"/>' : '') +
+      `<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/${BANDEAU_PNG}"/>` +
       '</Relationships>');
+    const hasLogo = true;
 
     // 4. relation document → header.
     if (docRelsFile && !relsTxt.includes(HDR_REL)) {
@@ -1877,6 +1863,10 @@ Renvoie uniquement un objet JSON valide contenant les ${batchPrompts.length} val
     out = out.replace(/<w:pgMar\b([^>]*)\/>/g, (_full, attrs) => {
       let a = attrs.replace(/\sw:header="\d+"/, ' w:header="284"');
       if (!/w:header=/.test(a)) a += ' w:header="284"';
+      // V1.6 iter2 — marge haute >= hauteur du bandeau (3,5 cm ≈ 2000 twips) pour que
+      // l'en-tête PNG soit visible (sinon w:top="0" → le corps recouvre le bandeau).
+      a = a.replace(/\sw:top="-?\d+"/, ' w:top="2000"');
+      if (!/w:top=/.test(a)) a += ' w:top="2000"';
       return `<w:pgMar${a}/>`;
     });
     console.log(`[MemoireGenerator] V1.3 bandeau : header1.xml attaché à ${injected} sectPr (logo=${hasLogo}).`);
@@ -2194,7 +2184,12 @@ Renvoie uniquement un objet JSON valide contenant les ${batchPrompts.length} val
     console.log(`[MemoireGenerator] Synthèse ajoutée avec succès (${generatedText.length} caractères).`);
 
     // ── 8. Sérialiser et sauvegarder (structure AO RNE 100% intacte + 1 section ajoutée) ──
-    zip.file('word/document.xml', serializer.serializeToString(xmlDoc));
+    // V1.6 — bandeau GSS sur CHAQUE page : en-tête Word natif (header1.xml = PNG bandeau) attaché
+    // à chaque <w:sectPr>. C'est CE chemin (generate → generateFullMemoire) qu'utilise le bouton
+    // « Générer le mémoire » quand il n'y a pas de cadre client. Word répète le bandeau partout.
+    this.injectBandeauPng(zip);
+    const finalDocXml = this.attachSectionHeader(zip, serializer.serializeToString(xmlDoc));
+    zip.file('word/document.xml', finalDocXml);
     const buf = zip.generate({ type: 'nodebuffer', compression: 'DEFLATE' });
     const outputFileName = `Mémoire technique GSS_${Date.now()}.docx`;
     const outputPath = path.join(this.responseDir, outputFileName);
