@@ -77,6 +77,82 @@ def line_hl_words(line_bbox, words, yrects):
     return (covered / total if total else 0.0), hl_words
 
 
+def collapse_repeats(text):
+    """Replie toute séquence de mots CONTIGUË répétée immédiatement (A B C A B C → A B C). Le PDF figé
+    AO RNE.pdf contient du texte dupliqué qui se superpose exactement (zones de texte sales du .docx) ;
+    à l'écran les copies coïncident, mais l'extraction renvoie la séquence en double (ex. « est élevé.
+    Sur des sites dits élevé. Sur des sites dits «sensibles» »). On ne replie que les répétitions de
+    ≥2 mots (les doublons d'un seul mot peuvent être légitimes : « très très »)."""
+    words = (text or "").split()
+    n = len(words)
+    out = []
+    i = 0
+    while i < n:
+        best_k = 0
+        for k in range((n - i) // 2, 1, -1):  # plus longue séquence répétée d'abord, k ≥ 2
+            if words[i:i + k] == words[i + k:i + 2 * k]:
+                best_k = k
+                break
+        if best_k:
+            out.extend(words[i:i + best_k])  # on garde UNE copie
+            i += best_k * 2                  # on saute les deux copies
+        else:
+            out.append(words[i])
+            i += 1
+    return " ".join(out)
+
+
+# ─── Détection / esquive des images du template ───
+
+IMG_MARGIN = 3.0      # pt de garde laissés autour d'une image
+MIN_USABLE_W = 40.0   # largeur min. d'une zone d'écriture exploitable après rognage
+MIN_USABLE_H = 8.0    # hauteur min. (≈ une ligne)
+
+
+def page_image_rects(page):
+    """Rectangles RÉELS des images bitmap d'une page (placement + CTM appliqués), pas la simple
+    déclaration. On ignore les images minuscules (icônes, filets) qui ne gênent pas la lecture, ET
+    les fonds de page (image englobant la zone ou couvrant > 55 % de la page) : sur ces templates,
+    le texte est calé PAR-DESSUS le fond par design, il ne faut donc pas l'esquiver."""
+    rects = []
+    page_area = abs(page.rect.get_area()) or 1.0
+    for img in page.get_images(full=True):
+        try:
+            for r in page.get_image_rects(img[0]):
+                if r.width >= 8 and r.height >= 8 and abs(r.get_area()) <= 0.55 * page_area:
+                    rects.append(+r)
+        except Exception:  # noqa: BLE001 — une image illisible ne doit jamais bloquer la réécriture
+            pass
+    return rects
+
+
+def clip_rect_to_images(rect, img_rects):
+    """Réduit `rect` pour qu'il n'empiète plus sur une image, en gardant la PLUS GRANDE zone encore
+    exploitable obtenue en coupant d'UN seul côté (au-dessus / sous / à gauche / à droite de l'image).
+    Une image qui englobe la zone (fond) est ignorée. Si AUCUNE coupe ne laisse de place exploitable,
+    on conserve la zone telle quelle : mieux vaut un léger chevauchement qu'un texte manquant."""
+    r = +rect
+    for im in img_rects:
+        if not r.intersects(im):
+            continue
+        # Image englobant la zone (fond résiduel) → ne pas rogner.
+        if im.x0 <= r.x0 + 2 and im.x1 >= r.x1 - 2 and im.y0 <= r.y0 + 2 and im.y1 >= r.y1 - 2:
+            continue
+        cands = []
+        if im.y0 > r.y0 + 2:  # garder la partie AU-DESSUS de l'image
+            cands.append(fitz.Rect(r.x0, r.y0, r.x1, min(r.y1, im.y0 - IMG_MARGIN)))
+        if im.y1 < r.y1 - 2:  # repartir SOUS l'image
+            cands.append(fitz.Rect(r.x0, max(r.y0, im.y1 + IMG_MARGIN), r.x1, r.y1))
+        if im.x0 > r.x0 + 2:  # garder la colonne À GAUCHE de l'image
+            cands.append(fitz.Rect(r.x0, r.y0, min(r.x1, im.x0 - IMG_MARGIN), r.y1))
+        if im.x1 < r.x1 - 2:  # garder la colonne À DROITE de l'image
+            cands.append(fitz.Rect(max(r.x0, im.x1 + IMG_MARGIN), r.y0, r.x1, r.y1))
+        usable = [c for c in cands if c.width >= MIN_USABLE_W and c.height >= MIN_USABLE_H]
+        if usable:
+            r = max(usable, key=lambda c: c.get_area())
+    return r
+
+
 def detect_highlights(doc):
     """Renvoie la liste des zones surlignées. On s'appuie sur la structure blocs/lignes de PyMuPDF
     (ordre de lecture + colonnes). Pour CHAQUE zone on renvoie :
@@ -87,6 +163,7 @@ def detect_highlights(doc):
     regions = []
     for pno in range(doc.page_count):
         page = doc[pno]
+        img_rects = page_image_rects(page)  # images à esquiver (calculé une fois par page)
         yellow, bg_fills = [], []  # bg_fills: (area, rect, color)
         for d in page.get_drawings():
             fill, rect = d.get("fill"), d.get("rect")
@@ -132,6 +209,7 @@ def detect_highlights(doc):
 
         for lines in passages:
             text = re.sub(r"\s+", " ", " ".join(w for L in lines for w in L["hl_words"])).strip()
+            text = collapse_repeats(text)  # PDF figé : retire les séquences dupliquées superposées
             if not text:
                 continue
             spans = [sp for L in lines for sp in L["spans"] if sp.get("text", "").strip()]
@@ -168,6 +246,11 @@ def detect_highlights(doc):
             if origin_x0 - body_x0 > GUTTER_MIN_PT:
                 ins.x0 = origin_x0
 
+            # Esquiver les images du template : on rogne la zone d'écriture pour qu'elle s'arrête
+            # avant l'image. Le budget GPT (passage_budget → char_budget) lit cet `insert` rogné,
+            # donc la réécriture vise directement la place réellement disponible.
+            ins = clip_rect_to_images(ins, img_rects)
+
             colors = {}
             for sp in spans:
                 colors[sp.get("color", 0)] = colors.get(sp.get("color", 0), 0) + 1
@@ -193,47 +276,72 @@ def detect_highlights(doc):
     return merge_overlapping_regions(regions)
 
 
+def _norm_txt(t):
+    """Texte normalisé pour comparer (sans casse ni espaces multiples)."""
+    return re.sub(r"\s+", " ", t or "").strip().lower()
+
+
 def merge_overlapping_regions(regions):
-    """Fusionne, par page, les zones dont les rectangles d'écriture se CHEVAUCHENT (cas des paragraphes
-    qui s'enroulent autour d'une image → PyMuPDF les éclate en plusieurs groupes de lignes qui se
-    recouvrent). Sans cela, plusieurs réécritures se dessinent au même endroit (texte illisible)."""
+    """Fusionne, par page, les zones d'un MÊME paragraphe que PyMuPDF a éclatées. Deux cas :
+      1) rectangles d'écriture qui se CHEVAUCHENT (paragraphe enroulé autour d'une image) ;
+      2) MÊME texte (ou l'un inclus dans l'autre) éclaté en plusieurs morceaux NON contigus.
+         Ce 2e cas vient du PDF figé AO RNE.pdf : il contient du texte DUPLIQUÉ qui se superpose
+         exactement (issu des zones de texte sales du .docx d'origine). À l'écran les copies
+         coïncident → ça paraît propre, mais la détection capte chaque copie + des fragments
+         (« Nos », « Nos agents »…), et chacun était réinséré séparément → garbage (micro-colonnes,
+         doublons). On les regroupe : géométrie = UNION (cadre de pleine largeur retrouvé), texte =
+         ensemble MAXIMAL (on retire toute chaîne incluse dans une autre → plus de doublon), bandes =
+         toutes (on rédige donc TOUTES les copies). Les paragraphes réellement distincts qui ne font
+         que s'enrouler restent concaténés dans l'ordre de lecture."""
     by_page = {}
     for r in regions:
         by_page.setdefault(r["page"], []).append(r)
     out = []
     for pno, regs in by_page.items():
+        norms = [_norm_txt(r["text"]) for r in regs]
         used = [False] * len(regs)
         for i in range(len(regs)):
             if used[i]:
                 continue
             grp = [regs[i]]
+            grp_norms = [norms[i]]
             used[i] = True
             box = fitz.Rect(regs[i]["insert"])
             changed = True
             while changed:
                 changed = False
                 for j in range(len(regs)):
-                    if not used[j] and fitz.Rect(regs[j]["insert"]).intersects(box):
+                    if used[j]:
+                        continue
+                    overlap = fitz.Rect(regs[j]["insert"]).intersects(box)
+                    # même texte / fragment : l'un inclus dans l'autre (≥4 car. pour éviter les faux positifs)
+                    nj = norms[j]
+                    same = nj and any(nj == u or (len(nj) >= 4 and (nj in u or u in nj)) for u in grp_norms)
+                    if overlap or same:
                         grp.append(regs[j])
+                        grp_norms.append(nj)
                         used[j] = True
                         box |= fitz.Rect(regs[j]["insert"])
                         changed = True
             if len(grp) == 1:
                 out.append(grp[0])
                 continue
-            grp.sort(key=lambda r: (r["insert"][1], r["insert"][0]))
             rep = max(grp, key=lambda r: (r["insert"][2] - r["insert"][0]) * (r["insert"][3] - r["insert"][1]))
-            texts = []
-            for r in grp:
-                t = r["text"]
-                if not any(t in u or u in t for u in texts):
-                    texts.append(t)
+            # Texte = chaînes MAXIMALES (toute chaîne incluse dans une autre est retirée → dédoublonnage),
+            # ordonnées par position de lecture (y puis x) pour les paragraphes réellement distincts.
+            cand = [r for r in grp if r["text"].strip()]
+            maximal = []
+            for r in sorted(cand, key=lambda r: len(r["text"]), reverse=True):
+                nt = _norm_txt(r["text"])
+                if not any(nt in _norm_txt(m["text"]) for m in maximal):
+                    maximal.append(r)
+            maximal.sort(key=lambda r: (round(r["insert"][1]), round(r["insert"][0])))
             out.append({
                 "page": pno,
                 "bands": [b for r in grp for b in r["bands"]],
                 "insert": [box.x0, box.y0, box.x1, box.y1],
                 "size": rep["size"],
-                "text": " ".join(texts),
+                "text": collapse_repeats(" ".join(r["text"].strip() for r in maximal)),
                 "bg": rep["bg"],
                 "color": rep["color"],
             })
@@ -279,7 +387,8 @@ FILL_FACTOR = 0.88
 
 def passage_budget(r):
     """Budget de caractères d'un passage : ce qui tient dans la zone (avec marge de sécurité pour rester à
-    la taille d'origine), borné à ~1.1× l'original."""
+    la taille d'origine), borné à ~1.1× l'original. On NE cherche PAS à étoffer ici : la page est designée
+    (texte calé autour des images) → on garde la longueur, la position et la taille d'origine."""
     cap = int(char_budget(r) * FILL_FACTOR)
     return max(1, min(cap, int(len(r["text"]) * 1.1) or cap))
 
@@ -315,7 +424,16 @@ def _build_messages(passages, budgets, texts, ctx):
         f"\"{client_name}\"" + (f" et à ses sites ({sites})" if sites else "") + ". Comprends le secteur "
         "d'activité, le fonctionnement et les enjeux du client (issus de l'ANALYSE DU DCE) et relie-y le "
         "contenu du passage (enjeux, risques, contraintes, sites précis), en montrant comment GSS y répond.\n"
-        "- Conserve une LONGUEUR PROCHE de l'original (≈ nombre de caractères indiqué, ne dépasse pas).\n"
+        "- STRATÉGIQUE : ne reformule pas platement. Montre que GSS a compris l'enjeu PRÉCIS du client, "
+        "propose un VRAI AVANTAGE différenciant (un moyen, une méthode ou un engagement concret) et son "
+        "bénéfice. Bannis les généralités interchangeables : chaque phrase doit rattacher GSS au contexte de ce client.\n"
+        "- VALEUR AJOUTÉE : termine l'idée sur ce que GSS apporte concrètement à CE client par rapport à un "
+        "prestataire lambda (gain de sécurité, de conformité, de réactivité, de tranquillité). Le lecteur doit "
+        "comprendre pourquoi choisir GSS.\n"
+        "- COHÉRENCE DE PAGE : reste dans le sujet exact du passage et de son titre de section ; ne change pas "
+        "de thème, n'introduis pas d'élément absent de la page (chiffres, sites ou prestations non mentionnés).\n"
+        "- LONGUEUR : reste TRÈS PROCHE du nombre de caractères de l'original (≈ budget indiqué), sans jamais "
+        "le dépasser — la page est mise en forme autour d'images, le texte doit garder exactement sa place et sa taille.\n"
         "- Concret et professionnel ; aucune puce, aucun markdown, aucun titre : du texte continu, phrases complètes.\n"
         "- Renvoie un JSON STRICT : {\"rewrites\": [\"...\", ...]} dans le MÊME ordre et le MÊME nombre que les "
         "passages. Chaque réécriture NON VIDE."
@@ -506,17 +624,36 @@ def apply_rewrites(doc, regions, rewrites, fontfile):
     # 2) Insertion du texte réécrit dans la zone d'écriture (lignes entièrement surlignées), à la taille
     #    d'origine si possible, sans jamais laisser vide ni écraser le texte voisin conservé.
     filled = 0
+    img_cache = {}  # rects d'images par page (calcul unique)
     for i, r in enumerate(regions):
         page = doc[r["page"]]
         size = r["size"] if r["size"] > 4 else 10.5
         text = (rewrites[i] or "").strip()
         if not text:
             continue
-        kw = dict(color=tuple(r["color"]), align=fitz.TEXT_ALIGN_LEFT)
+        rect = fitz.Rect(r["insert"])
+        # Le rectangle d'écriture vient du bbox SERRÉ des lignes surlignées (hauteur de glyphes),
+        # soit ~0,4 interligne de moins que l'interligne dont insert_textbox a besoin. Résultat : même
+        # le texte à longueur d'origine ne tient pas à sa taille → insert_fit RÉDUISAIT la police, et
+        # chaque passage finissait à une taille différente (mise en forme incohérente). On rend ce
+        # ~0,4 interligne sous la zone (la bande surlignée est suivie d'un blanc d'interligne) pour que
+        # la réécriture tienne à la TAILLE D'ORIGINE et reste homogène avec le reste de la page.
+        rect.y1 += size * 0.45
+        # L'extension verticale ci-dessus peut re-rentrer dans une image juste sous la zone : on
+        # re-rogne face aux images pour garantir qu'aucune lettre ne se rende par-dessus une image.
+        if r["page"] not in img_cache:
+            img_cache[r["page"]] = page_image_rects(page)
+        rect = clip_rect_to_images(rect, img_cache[r["page"]])
+        # Le corps du mémoire est JUSTIFIÉ (les marges droites des paragraphes sont alignées). On
+        # reproduit cette justification sur les passages multi-lignes pour que la réécriture se fonde
+        # dans la page ; on conserve l'alignement à gauche pour les libellés d'UNE seule ligne, où la
+        # justification étirerait disgracieusement les espaces d'une ligne unique.
+        n_lines = max(1, int((rect.y1 - rect.y0) / (size * 1.2)))
+        align = fitz.TEXT_ALIGN_JUSTIFY if n_lines > 1 else fitz.TEXT_ALIGN_LEFT
+        kw = dict(color=tuple(r["color"]), align=align)
         kw["fontname"] = "trebuc" if use_trebuc else "helv"
         if use_trebuc:
             kw["fontfile"] = fontfile
-        rect = fitz.Rect(r["insert"])
         if insert_fit(page, rect, text, size, kw, indent=FIRST_LINE_INDENT):
             filled += 1
     return filled

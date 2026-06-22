@@ -192,7 +192,7 @@ function stripHighlightAnnotations(doc: PDFDocument) {
  */
 export async function measureZonesCapacity(
   pdfBuffer: Buffer, fontBytes: Buffer | null,
-): Promise<{ zones: number; totalLines: number; charsPerLine: number }> {
+): Promise<{ zones: number; totalLines: number; charsPerLine: number; perZoneLines: number[] }> {
   const boxes = await findZoneBoxes(pdfBuffer);
   const doc = await PDFDocument.load(pdfBuffer);
   let font: PDFFont;
@@ -201,12 +201,15 @@ export async function measureZonesCapacity(
 
   const lineHeight = FONT_SIZE * LINE_LEADING;
   const blockWidth = BOX_RIGHT - BOX_LEFT;   // 1 colonne pleine largeur
-  const totalLines = boxes.reduce((sum, b) => sum + columnCapacity(b, lineHeight), 0);
+  // Capacité (lignes) PAR zone, dans le MÊME ordre que `findZoneBoxes` (ordre de lecture des pages),
+  // pour dimensionner le texte de chaque page indépendamment.
+  const perZoneLines = boxes.map((b) => columnCapacity(b, lineHeight));
+  const totalLines = perZoneLines.reduce((sum, n) => sum + n, 0);
 
   // Largeur moyenne d'un caractère « courant » à FONT_SIZE → nb de car. par ligne pleine largeur.
   const avgCharW = font.widthOfTextAtSize('en ara ti on le re', FONT_SIZE) / 18;
   const charsPerLine = Math.max(1, Math.floor(blockWidth / avgCharW));
-  return { zones: boxes.length, totalLines, charsPerLine };
+  return { zones: boxes.length, totalLines, charsPerLine, perZoneLines };
 }
 
 /** Nb de lignes utiles dans UNE colonne d'un cadre (hauteur exploitable / interligne × remplissage). */
@@ -293,9 +296,12 @@ function drawColumn(page: PDFPage, lines: Line[], x: number, topY: number, colWi
 export async function overlaySynthesis(
   pdfBuffer: Buffer, fullText: string, fontBytes: Buffer | null,
   replacements: RefReplacement[] = [], refCtx?: RefContext, highlightFills: HighlightFill[] = [],
+  opts: { zoneTexts?: string[]; docTitle?: string } = {},
 ): Promise<{ bytes: Uint8Array; zonesUsed: number; linesDrawn: number; truncated: boolean; refsReplaced: number; highlightsFilled: number }> {
   const boxes = await findZoneBoxes(pdfBuffer);
   const doc = await PDFDocument.load(pdfBuffer);
+  // Titre interne du PDF (onglet du lecteur) : remplace celui hérité du template (ancien client).
+  if (opts.docTitle?.trim()) doc.setTitle(opts.docTitle.trim());
   let font: PDFFont;
   if (fontBytes) { doc.registerFontkit(fontkit); font = await doc.embedFont(fontBytes, { subset: true }); }
   else font = await doc.embedFont(StandardFonts.Helvetica);
@@ -309,9 +315,15 @@ export async function overlaySynthesis(
   // Capacité (lignes, 1 colonne pleine largeur) par zone, plafonnée par le taux de remplissage.
   const caps = boxes.map((b) => columnCapacity(b, lineHeight));
 
-  // Découpe le texte une seule fois (pleine largeur, alinéa de 1re ligne) puis répartit équitablement.
-  const paras = fullText.replace(/\r\n/g, '\n').split(/\n\s*\n/).map((p) => p.replace(/\s*\n\s*/g, ' ').trim()).filter(Boolean);
-  const allLines = paragraphsToLines(paras, blockWidth, font, FONT_SIZE, PARA_INDENT);
+  // Mode PAR ZONE : un texte propre à chaque page (zoneTexts[i]). Sinon (fallback rétro-compatible),
+  // un seul bloc continu réparti proportionnellement sur toutes les zones.
+  const perZoneMode = Array.isArray(opts.zoneTexts) && opts.zoneTexts.length > 0;
+  const toLines = (txt: string) => paragraphsToLines(
+    txt.replace(/\r\n/g, '\n').split(/\n\s*\n/).map((p) => p.replace(/\s*\n\s*/g, ' ').trim()).filter(Boolean),
+    blockWidth, font, FONT_SIZE, PARA_INDENT,
+  );
+  // Fallback : tout le texte découpé une fois, réparti à la ligne.
+  const allLines = perZoneMode ? [] : toLines(fullText);
 
   let cursor = 0, linesDrawn = 0, zonesUsed = 0;
   let truncated = false;
@@ -324,20 +336,29 @@ export async function overlaySynthesis(
     const rectTop = b.topY + MASK_PAD_TOP;
     page.drawRectangle({ x: BOX_LEFT - 4, y: rectBottom, width: (BOX_RIGHT - BOX_LEFT) + 8, height: rectTop - rectBottom, color: bg });
 
-    // Répartition PROPORTIONNELLE à la capacité restante : si le texte ne suffit pas à tout remplir,
-    // il est étalé sur TOUTES les zones (aucune page laissée vide) ; s'il y en a assez, chaque cadre
-    // est rempli jusqu'à SA capacité et le surplus est tronqué.
-    const remainingLines = allLines.length - cursor;
-    const remainingCap = caps.slice(i).reduce((s, c) => s + c, 0) || 1;
-    const isLast = i === boxes.length - 1;
-    const take = Math.min(
-      caps[i],
-      remainingLines,
-      isLast ? remainingLines : Math.round(remainingLines * (caps[i] / remainingCap)),
-    );
-    if (take <= 0) return;
-    const zoneLines = allLines.slice(cursor, cursor + take);
-    cursor += take;
+    let zoneLines: Line[];
+    if (perZoneMode) {
+      // Le texte de CETTE page, borné à la capacité du cadre (surplus tronqué, jamais de débordement).
+      const zLines = toLines(opts.zoneTexts![i] || '');
+      if (zLines.length > caps[i]) truncated = true;
+      zoneLines = zLines.slice(0, caps[i]);
+    } else {
+      // Répartition PROPORTIONNELLE à la capacité restante : si le texte ne suffit pas à tout remplir,
+      // il est étalé sur TOUTES les zones (aucune page laissée vide) ; s'il y en a assez, chaque cadre
+      // est rempli jusqu'à SA capacité et le surplus est tronqué.
+      const remainingLines = allLines.length - cursor;
+      const remainingCap = caps.slice(i).reduce((s, c) => s + c, 0) || 1;
+      const isLast = i === boxes.length - 1;
+      const take = Math.min(
+        caps[i],
+        remainingLines,
+        isLast ? remainingLines : Math.round(remainingLines * (caps[i] / remainingCap)),
+      );
+      if (take <= 0) return;
+      zoneLines = allLines.slice(cursor, cursor + take);
+      cursor += take;
+    }
+    if (!zoneLines.length) return;
     zonesUsed++;
     linesDrawn += zoneLines.filter((l) => l.text).length;
 
@@ -345,7 +366,7 @@ export async function overlaySynthesis(
     drawColumn(page, zoneLines, BOX_LEFT, b.topY - TOP_INSET, blockWidth, lineHeight, font, FONT_SIZE, textColor);
   });
 
-  if (cursor < allLines.filter((l) => l.text).length) truncated = true;
+  if (!perZoneMode && cursor < allLines.filter((l) => l.text).length) truncated = true;
 
   // Personnalisation des références figées (ancien client / sites / libellés) par masque+redraw.
   let refsReplaced = 0;

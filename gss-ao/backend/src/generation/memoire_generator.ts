@@ -19,6 +19,21 @@ const MEMOIRE_MODEL = process.env.MEMOIRE_MODEL || 'gpt-4o-mini';
 const IMAGE_MODEL = process.env.IMAGE_MODEL || 'gpt-image-1';
 const IMAGES_ENABLED = process.env.GENERATE_IMAGES !== 'false';
 
+// Modèle d'EMBEDDINGS pour la recherche sémantique (index Doc GSS + DCE). text-embedding-3-small :
+// 1536 dim, peu coûteux, TPM élevée → on peut indexer toute la doc + embedder chaque requête de champ.
+const EMBED_MODEL = process.env.EMBEDDING_MODEL_MEMOIRE || 'text-embedding-3-small';
+
+/** Un passage indexable pour la recherche sémantique (Doc GSS ou DCE). */
+interface RetrievalChunk { source: 'GSS' | 'DCE'; label: string; text: string; embedding?: number[]; }
+
+/** Similarité cosinus entre deux vecteurs (0 si l'un est nul). */
+function cosine(a: number[], b: number[]): number {
+  let dot = 0, na = 0, nb = 0;
+  const n = Math.min(a.length, b.length);
+  for (let i = 0; i < n; i++) { dot += a[i] * b[i]; na += a[i] * a[i]; nb += b[i] * b[i]; }
+  return na && nb ? dot / (Math.sqrt(na) * Math.sqrt(nb)) : 0;
+}
+
 // ─── DOM Helpers ───
 
 function findLocalNameChild(node: any, name: string): any {
@@ -969,6 +984,490 @@ const GSS_DOC_KEYWORDS: Record<string, string[]> = {
   'VALEURS': ['valeur', 'engagement', 'ethique', 'mission', 'vision'],
 };
 
+// ─── Solutions GSS spécifiques par section × type de marché (public / privé) ───
+// Pour chaque thématique du mémoire, liste les arguments stratégiques GSS différenciants
+// selon que le client est un acheteur public (Code de la commande publique) ou privé.
+// `common` = applicable quel que soit le cadre. Utilisé pour enrichir les prompts IA.
+
+interface GssSolutionSet { public: string[]; prive: string[]; common: string[]; }
+const GSS_SOLUTIONS_BY_CONTEXT: Record<string, GssSolutionSet> = {
+  // ── I — Présentation de notre structure ──
+  'presentation': {
+    public: [
+      `Conformité au Code de la commande publique (art. L2141-1 et suivants) et transparence des procédures`,
+      `Référencement sur plateformes de dématérialisation (PLACE, AWS, profils acheteurs)`,
+      `Expérience avérée auprès de collectivités territoriales, EPCI, universités et établissements publics`,
+      `Capacité à produire les attestations fiscales et sociales exigées (DC1/DC2, NOTI1/NOTI2)`,
+    ],
+    prive: [
+      `Souplesse contractuelle et adaptation rapide aux besoins évolutifs du client`,
+      `Interlocuteur unique dédié avec engagement de réactivité < 1h`,
+      `SLA personnalisés avec indicateurs de performance et bonus/malus`,
+      `Confidentialité renforcée (NDA, habilitations spécifiques au secteur)`,
+    ],
+    common: [
+      `Agréments CNAPS et autorisations préfectorales à jour sur toute la zone géographique`,
+      `Assurance responsabilité civile professionnelle couvrant l'intégralité du périmètre`,
+      `Certifications qualité (ISO 9001, Qualiopi pour la formation)`,
+    ],
+  },
+  'implantation': {
+    public: [
+      `Maillage territorial permettant une couverture multi-sites (agences de proximité en région)`,
+      `Connaissance des spécificités des ERP (Établissements Recevant du Public) et des campus`,
+    ],
+    prive: [
+      `Implantation locale garantissant un temps d'intervention réduit (< 30 min)`,
+      `Bureau opérationnel dédié sur site pour les contrats importants`,
+    ],
+    common: [
+      `Réseau national d'agences GSS avec encadrement régional`,
+      `Centre opérationnel 24/7 pour coordination et pilotage à distance`,
+    ],
+  },
+  'agrements': {
+    public: [
+      `Production systématique de l'extrait K-bis, attestations URSSAF/impôts, casiers judiciaires des dirigeants`,
+      `Renouvellement proactif des agréments CNAPS avant échéance (anticipation de 6 mois)`,
+      `Conformité aux critères d'exclusion de la commande publique (art. L2141-1 à L2141-11)`,
+    ],
+    prive: [
+      `Audit de conformité réglementaire inclus dans la prestation (veille CNAPS)`,
+      `Garantie contractuelle de mise à jour permanente des autorisations`,
+    ],
+    common: [
+      `Autorisation d'exercice CNAPS pour chaque agence du périmètre`,
+      `Agréments dirigeants et cartes professionnelles de tous les agents vérifiées`,
+    ],
+  },
+  'engagement_rse': {
+    public: [
+      `Réponse aux critères environnementaux et sociaux des marchés publics (art. L2112-2 du CCP)`,
+      `Clause d'insertion professionnelle et engagement en faveur de l'emploi local`,
+      `Bilan carbone annuel et plan de réduction des émissions`,
+    ],
+    prive: [
+      `Labellisation RSE et reporting extra-financier adapté au secteur du client`,
+      `Politique de mobilité durable (véhicules électriques/hybrides pour les rondes)`,
+    ],
+    common: [
+      `Flotte de véhicules à faibles émissions pour les interventions`,
+      `Dématérialisation complète (main courante électronique, reporting en ligne)`,
+      `Politique zéro papier et tri sélectif sur les postes`,
+    ],
+  },
+  // ── II — Les moyens humains ──
+  'moyens_humains': {
+    public: [
+      `Transparence sur les qualifications : CV anonymisés et fiches de poste conformes au CCTP`,
+      `Respect des grilles salariales conventionnelles et engagement anti-dumping social`,
+      `Taux d'encadrement supérieur aux minimums réglementaires (1 chef d'équipe / 15 agents)`,
+    ],
+    prive: [
+      `Sélection sur mesure des profils en fonction du secteur d'activité du client`,
+      `Possibilité de validation préalable des agents par le client (entretien conjoint)`,
+      `Programme de fidélisation (prime de site, avantages, parcours de carrière)`,
+    ],
+    common: [
+      `Agents titulaires CQP APS, SSIAP 1/2/3, SST selon les postes`,
+      `Vérification systématique carte CNAPS + casier judiciaire à l'embauche`,
+      `Formation continue obligatoire (MAC APS, recyclage SSIAP, exercices incendie)`,
+    ],
+  },
+  'encadrement': {
+    public: [
+      `Organigramme opérationnel dédié au marché, transmis à l'acheteur avec CVs`,
+      `Réunions de suivi périodiques (trimestrielles) avec compte-rendu formalisé`,
+      `Chef de site SSIAP 2/3 coordinateur sûreté-sécurité selon exigences du CCTP`,
+    ],
+    prive: [
+      `Directeur de compte unique avec disponibilité 7j/7`,
+      `Reporting personnalisé selon les KPIs définis conjointement`,
+      `Comité de pilotage mensuel avec tableaux de bord opérationnels`,
+    ],
+    common: [
+      `Management de proximité : responsable d'exploitation basé en région`,
+      `Chaîne d'astreinte 24/7 (agent → chef d'équipe → responsable exploitation → direction)`,
+    ],
+  },
+  'reprise_personnel': {
+    public: [
+      `Application stricte de l'article L1224-1 du Code du travail (obligation légale de reprise)`,
+      `Transparence totale : entretiens individuels, maintien des droits acquis, information du CSE`,
+      `Délai de transition structuré (J-45 à J+15) avec plan de reprise détaillé`,
+    ],
+    prive: [
+      `Reprise volontaire du personnel en place pour garantir la continuité de service`,
+      `Audit social préalable (ancienneté, qualifications, souhaits de mobilité)`,
+      `Programme d'intégration accéléré aux process et à la culture GSS`,
+    ],
+    common: [
+      `Maintien des conditions salariales et avantages acquis du personnel repris`,
+      `Plan de formation passerelle pour mise à niveau aux standards GSS`,
+      `Accompagnement RH personnalisé pendant la période de transition (3 mois)`,
+    ],
+  },
+  'recrutement_formation': {
+    public: [
+      `Plan de formation annuel transmis à l'acheteur (obligation du CCTP)`,
+      `Habilitations spécifiques aux sites publics (ERP, ICPE, ZRR, zones sensibles)`,
+      `Partenariats avec les CFA et organismes de formation certifiés Qualiopi`,
+    ],
+    prive: [
+      `Formation aux risques spécifiques du secteur client (industriel, logistique, tertiaire)`,
+      `E-learning GSS Academy : modules accessibles 24/7 pour montée en compétences continue`,
+    ],
+    common: [
+      `Processus de recrutement rigoureux en 5 étapes (sourcing, entretien, vérifications, formation, intégration)`,
+      `Formation initiale renforcée (consignes de poste, procédures GSS, culture client)`,
+      `Recyclages MAC APS / SSIAP dans les délais réglementaires`,
+    ],
+  },
+  'dispositif_absence': {
+    public: [
+      `Engagement contractuel de remplacement en < 2h (pénalité applicable en cas de manquement)`,
+      `Volant de réserve régional dimensionné selon les effectifs du marché (ratio 1 réserviste / 8 titulaires)`,
+    ],
+    prive: [
+      `Remplacement garanti en < 1h grâce au vivier de proximité`,
+      `Application mobile d'alerte pour mobilisation instantanée des agents disponibles`,
+    ],
+    common: [
+      `Planning prévisionnel avec gestion anticipée des congés, formations et absences prévisibles`,
+      `Agents remplaçants formés et habilités sur les consignes spécifiques du site`,
+      `Système de binômage : chaque titulaire a un remplaçant attitré connaissant le site`,
+    ],
+  },
+  'tenues_epi': {
+    public: [
+      `Tenues conformes au CCTP (logo, couleur, identification visible selon arrêté préfectoral)`,
+      `Dotation individuelle complète fournie à la prise de poste (pas de partage d'EPI)`,
+    ],
+    prive: [
+      `Personnalisation des tenues aux couleurs et au logo du client (co-branding)`,
+      `Adaptation des EPI aux risques spécifiques du site (ATEX, froid, chaleur, chimique)`,
+    ],
+    common: [
+      `Tenue professionnelle complète : veste, pantalon, polo, chaussures de sécurité, badge nominatif`,
+      `EPI selon poste : gilet haute visibilité, lampe torche, PTI/DATI, radio`,
+      `Renouvellement annuel et suivi de l'état des équipements`,
+    ],
+  },
+  // ── III — Les moyens opérationnels ──
+  'moyens_materiels': {
+    public: [
+      `Inventaire détaillé des équipements affectés au marché (annexe au mémoire)`,
+      `Véhicules sérigraphiés conformes aux exigences du CCTP (éco-conduite, géolocalisation)`,
+    ],
+    prive: [
+      `Dotation matérielle évolutive selon les besoins du client (scalabilité)`,
+      `Intégration aux systèmes existants du client (vidéosurveillance, contrôle d'accès, GTC)`,
+    ],
+    common: [
+      `Système de contrôle de rondes NFC/QR code avec horodatage et géolocalisation`,
+      `PTI/DATI pour protection du travailleur isolé sur chaque agent`,
+      `Radios numériques pour communication inter-agents et avec le PC sécurité`,
+      `Véhicules d'intervention équipés (gyrophare, premier secours, extincteur)`,
+    ],
+  },
+  'rondes': {
+    public: [
+      `Points de contrôle (pointeaux NFC) positionnés selon le plan de prévention du CCTP`,
+      `Rapports de rondes horodatés consultables par l'acheteur via l'extranet GSS`,
+    ],
+    prive: [
+      `Parcours de rondes personnalisés et modifiables en temps réel via l'application GSS`,
+      `Rondes aléatoires programmables pour effet dissuasif renforcé`,
+    ],
+    common: [
+      `Main courante électronique (TrackForce/LMC) : saisie terrain, photos, alertes en temps réel`,
+      `Reporting automatique : synthèse quotidienne, hebdomadaire et mensuelle`,
+      `Traçabilité complète : chaque ronde, chaque événement est horodaté et géolocalisé`,
+    ],
+  },
+  'controle_acces': {
+    public: [
+      `Gestion des accès conforme aux exigences ZRR/zone sensible (contrôle visuel + badge)`,
+      `Registre des entrées/sorties dématérialisé et consultable par l'administration`,
+    ],
+    prive: [
+      `Interfaçage avec les systèmes de contrôle d'accès existants (NEDAP, TIL, Honeywell)`,
+      `Gestion des visiteurs avec pré-enregistrement et QR code d'accès temporaire`,
+    ],
+    common: [
+      `Procédure d'accueil et de filtrage : vérification d'identité, orientation, enregistrement`,
+      `Gestion sécurisée des clés et badges (armoire à clés sécurisée, traçabilité)`,
+      `Contrôle des livraisons et des prestataires extérieurs`,
+    ],
+  },
+  'telesurveillance': {
+    public: [
+      `Station de télésurveillance certifiée APSAD P3/P5 (exigence fréquente des marchés publics)`,
+      `Délais d'intervention contractuels conformes au CCTP (engagements chiffrés par site)`,
+      `Intervenants véhiculés basés à moins de 20 km de chaque site (obligation APSAD)`,
+    ],
+    prive: [
+      `Offre modulable : télésurveillance seule, levée de doute, ou intervention complète`,
+      `Vidéosurveillance intelligente avec analyse comportementale (option)`,
+    ],
+    common: [
+      `Centre de télésurveillance opéré 24/7 par des opérateurs qualifiés`,
+      `Levée de doute vidéo et/ou physique selon protocole convenu`,
+      `Report des alarmes intrusion, technique et incendie avec gestion des priorités`,
+    ],
+  },
+  'gestion_alarmes': {
+    public: [
+      `Procédures d'intervention formalisées et validées par l'acheteur (annexe au marché)`,
+      `Rapport d'intervention transmis sous 24h avec analyse causes/conséquences`,
+    ],
+    prive: [
+      `Procédures d'escalade personnalisées selon la criticité (niveaux 1/2/3)`,
+      `Intégration des protocoles d'alerte du client (astreinte direction, cellule de crise)`,
+    ],
+    common: [
+      `Gestion des alarmes selon procédure graduée : vérification → alerte → intervention → rapport`,
+      `Coordination avec les forces de l'ordre et services de secours`,
+      `Retour d'expérience systématique après chaque incident significatif`,
+    ],
+  },
+  // ── IV — Les moyens organisationnels ──
+  'organisation': {
+    public: [
+      `Phase de transition structurée : visite des sites, rencontre du personnel, validation des consignes`,
+      `Plan de démarrage formalisé (J-30 à J+30) présenté à l'acheteur avant la prise d'effet`,
+      `Période de tuilage avec le prestataire sortant (si applicable)`,
+    ],
+    prive: [
+      `Audit sécurité gratuit préalable au démarrage (diagnostic des vulnérabilités)`,
+      `Mise en place progressive (montée en charge) pour les sites complexes`,
+    ],
+    common: [
+      `Réunion de lancement avec l'ensemble des parties prenantes`,
+      `Livret d'accueil et consignes de poste spécifiques au site`,
+      `Test opérationnel avant démarrage effectif (simulation d'incident)`,
+    ],
+  },
+  'planning': {
+    public: [
+      `Plannings mensuels transmis à l'acheteur pour validation avant exécution`,
+      `Respect strict des amplitudes horaires et repos réglementaires (Convention collective)`,
+      `Gestion des prestations supplémentaires sur devis préalable (bon de commande)`,
+    ],
+    prive: [
+      `Plannings flexibles ajustables en temps réel via l'application GSS`,
+      `Adaptation aux pics d'activité et événements exceptionnels du client`,
+    ],
+    common: [
+      `Logiciel de planification Comète/SILAE : optimisation des roulements et continuité`,
+      `Couverture 24/7 garantie avec chevauchements de vacation pour le passage de consignes`,
+      `Anticipation des congés et formations : planning prévisionnel à 3 mois`,
+    ],
+  },
+  'suivi_qualite': {
+    public: [
+      `Contrôles inopinés mensuels avec rapport transmis à l'acheteur`,
+      `Réunions de suivi trimestrielles avec indicateurs de performance (taux de couverture, incidents, remplacements)`,
+      `Extranet client : accès temps réel aux mains courantes, plannings et rapports`,
+    ],
+    prive: [
+      `Dashboard personnalisé avec KPIs définis conjointement (SLA, satisfaction, incidents)`,
+      `Enquête de satisfaction semestrielle auprès des utilisateurs du site`,
+    ],
+    common: [
+      `Plan d'assurance qualité (PAQ) formalisé et mis à jour annuellement`,
+      `Audit interne semestriel par la direction qualité GSS`,
+      `Traçabilité complète de toutes les actions (rondes, incidents, remplacements)`,
+    ],
+  },
+  'procedures': {
+    public: [
+      `Consignes de poste validées conjointement et mises à jour annuellement`,
+      `Procédures d'urgence conformes au plan de sécurité de l'établissement (PPMS, POI)`,
+      `Exercices d'évacuation et de mise en sûreté selon calendrier de l'acheteur`,
+    ],
+    prive: [
+      `Procédures adaptées aux risques spécifiques du secteur (vol, intrusion, incendie, social)`,
+      `Plan de continuité d'activité (PCA) intégré à celui du client`,
+    ],
+    common: [
+      `Procédures opérationnelles : accueil, filtrage, ronde, incident, alarme, évacuation`,
+      `Fiche réflexe par type d'événement (intrusion, incendie, accident, personne suspecte)`,
+      `Mise à jour continue des procédures selon retours d'expérience`,
+    ],
+  },
+  'amelioration': {
+    public: [
+      `Bilan annuel de prestation avec analyse des écarts et plan d'amélioration`,
+      `Propositions d'optimisation formalisées à chaque reconduction du marché`,
+    ],
+    prive: [
+      `Revue de performance trimestrielle avec propositions d'optimisation`,
+      `Benchmark sectoriel et veille technologique au service du client`,
+    ],
+    common: [
+      `Démarche d'amélioration continue (PDCA) intégrée au management GSS`,
+      `Analyse des incidents avec actions correctives et préventives tracées`,
+      `Veille réglementaire permanente (évolutions CNAPS, normes APSAD, droit du travail)`,
+    ],
+  },
+};
+
+// ─── Helpers stratégiques (type de marché, secteur, contexte réglementaire) ───
+
+/** Détecte si le marché est public ou privé d'après les données d'analyse du DCE. */
+function detectMarketType(analysisData: any): 'public' | 'prive' {
+  if (!analysisData) return 'public'; // défaut conservateur (plus exigeant)
+  const haystack = JSON.stringify(analysisData).toLowerCase();
+  const publicIndicators = [
+    'marche public', 'marché public', 'commande publique', 'code de la commande',
+    'ccag', 'pouvoir adjudicateur', 'collectivite', 'collectivité',
+    'universite', 'université', 'etablissement public', 'établissement public',
+    'commune ', 'mairie', 'departement', 'département', 'region ', 'région ',
+    'ministere', 'ministère', 'etat', 'état', 'hopital', 'hôpital', 'chu ',
+    'prefecture', 'préfecture', 'tribunal', 'conseil general', 'conseil général',
+    'conseil regional', 'conseil régional', 'communaute', 'communauté',
+    'syndicat mixte', 'office public', 'opac', 'oph', 'epci', 'sivom', 'sivu',
+    'dc1', 'dc2', 'noti1', 'noti2', 'dume', 'ae ', 'acte engagement',
+    'reglement de consultation', 'règlement de consultation',
+    'critere d\'attribution', 'critère d\'attribution',
+    'offre economiquement', 'offre économiquement',
+    'bulletin officiel des annonces', 'boamp', 'joue', 'ted ',
+    'procedure ouverte', 'procédure ouverte', 'procedure restreinte', 'procédure restreinte',
+    'accord-cadre', 'accord cadre', 'marche a procedure', 'marché à procédure',
+  ];
+  const privateIndicators = [
+    'appel d\'offres prive', 'appel d\'offres privé', 'consultation privee', 'consultation privée',
+    'societe ', 'société ', 'entreprise privee', 'entreprise privée',
+    'groupe ', 'holding', 'filiale', 'sas ', 'sarl ', 'sa ', 'sasu ',
+    'contrat de prestations', 'cahier des charges', 'rfp', 'rfi',
+  ];
+
+  let publicScore = 0, privateScore = 0;
+  for (const p of publicIndicators) if (haystack.includes(p)) publicScore++;
+  for (const p of privateIndicators) if (haystack.includes(p)) privateScore++;
+
+  return publicScore >= privateScore ? 'public' : 'prive';
+}
+
+/** Détecte le secteur d'activité du client d'après les données d'analyse. */
+function detectClientSector(analysisData: any): string {
+  if (!analysisData) return 'tertiaire';
+  const haystack = JSON.stringify(analysisData).toLowerCase();
+  const sectors: Array<{ name: string; keywords: string[] }> = [
+    { name: 'éducation / enseignement supérieur', keywords: ['universite', 'université', 'campus', 'faculte', 'faculté', 'ecole', 'école', 'lycee', 'lycée', 'college', 'collège', 'crous', 'rectorat', 'enseignement'] },
+    { name: 'santé / hospitalier', keywords: ['hopital', 'hôpital', 'chu', 'clinique', 'ehpad', 'centre hospitalier', 'ars ', 'sante', 'santé', 'medico', 'médico'] },
+    { name: 'industrie / logistique', keywords: ['usine', 'entrepot', 'entrepôt', 'plateforme logistique', 'zone industrielle', 'icpe', 'seveso', 'atex', 'industri'] },
+    { name: 'distribution / commerce', keywords: ['centre commercial', 'magasin', 'hypermarche', 'hypermarchée', 'supermarche', 'galerie marchande', 'retail', 'enseigne'] },
+    { name: 'événementiel / culture', keywords: ['parc des expositions', 'salle de spectacle', 'musee', 'musée', 'theatre', 'théâtre', 'stade', 'arena', 'festival', 'salon', 'congres', 'congrès', 'foire'] },
+    { name: 'transport / infrastructure', keywords: ['gare', 'aeroport', 'aéroport', 'port ', 'tramway', 'metro', 'métro', 'autoroute', 'parking', 'transport'] },
+    { name: 'tertiaire / bureaux', keywords: ['siege social', 'siège social', 'immeuble de bureaux', 'tour ', 'campus entreprise', 'coworking', 'tertiaire'] },
+    { name: 'collectivité territoriale', keywords: ['mairie', 'hotel de ville', 'hôtel de ville', 'conseil departemental', 'conseil départemental', 'conseil regional', 'conseil régional', 'commune ', 'communaute de communes', 'communauté de communes'] },
+    { name: 'résidentiel / habitat social', keywords: ['hlm', 'office public', 'bailleur', 'residence', 'résidence', 'copropriete', 'copropriété', 'habitat social'] },
+  ];
+  let best = 'tertiaire';
+  let bestScore = 0;
+  for (const s of sectors) {
+    const score = s.keywords.filter(kw => haystack.includes(kw)).length;
+    if (score > bestScore) { bestScore = score; best = s.name; }
+  }
+  return best;
+}
+
+/** Construit le cadre réglementaire applicable d'après le type de marché et le secteur. */
+function buildRegulatoryFramework(marketType: 'public' | 'prive', sector: string, analysisData: any): string {
+  const parts: string[] = [];
+  // Obligations communes
+  parts.push('Livre VI du Code de la sécurité intérieure (activités privées de sécurité)');
+  parts.push('Autorisation CNAPS obligatoire (entreprise + dirigeants + agents)');
+
+  if (marketType === 'public') {
+    parts.push('Code de la commande publique (ordonnance n°2018-1074 et décret n°2018-1075)');
+    parts.push('CCAG-FCS (Cahier des clauses administratives générales — Fournitures courantes et services)');
+    parts.push('Obligation de publicité et mise en concurrence');
+  } else {
+    parts.push('Droit commercial et Code civil (obligations contractuelles)');
+    parts.push('Convention collective nationale des entreprises de prévention et de sécurité');
+  }
+
+  // Obligations sectorielles
+  const haystack = JSON.stringify(analysisData || {}).toLowerCase();
+  if (haystack.includes('ssiap') || haystack.includes('incendie')) parts.push('Arrêté du 2 mai 2005 (SSIAP) — qualification incendie');
+  if (haystack.includes('apsad') || haystack.includes('telesurveillance') || haystack.includes('télésurveillance')) parts.push('Certification APSAD R31 (télésurveillance)');
+  if (haystack.includes('zrr') || haystack.includes('zone a regime restrictif') || haystack.includes('zone à régime restrictif')) parts.push('Habilitation ZRR (Zones à Régime Restrictif)');
+  if (haystack.includes('icpe') || haystack.includes('seveso')) parts.push('Réglementation ICPE / Seveso (sites industriels classés)');
+  if (haystack.includes('erp') || haystack.includes('etablissement recevant du public') || haystack.includes('établissement recevant du public')) parts.push('Réglementation ERP (sécurité incendie, accessibilité)');
+  if (haystack.includes('l1224') || haystack.includes('reprise')) parts.push('Article L1224-1 du Code du travail (reprise du personnel)');
+
+  return parts.join(' ; ');
+}
+
+/**
+ * Construit le bloc de contexte stratégique à injecter dans les prompts IA pour une section donnée.
+ * Sélectionne les solutions GSS pertinentes au type de marché (public/privé) et au thème de la section.
+ */
+function buildStrategicContext(sectionId: string, analysisData: any): string {
+  const marketType = detectMarketType(analysisData);
+  const sector = detectClientSector(analysisData);
+  const regulatory = buildRegulatoryFramework(marketType, sector, analysisData);
+
+  // Trouver la clé de solution la plus proche du sectionId
+  const sectionKey = sectionId.replace(/^b_/, '').replace(/^(i+|iv)_/, '');
+  const solutions = GSS_SOLUTIONS_BY_CONTEXT[sectionKey];
+
+  let solutionsBlock = '';
+  if (solutions) {
+    const relevant = [
+      ...solutions.common,
+      ...(marketType === 'public' ? solutions.public : solutions.prive),
+    ];
+    solutionsBlock = relevant.map((s, i) => `${i + 1}. ${s}`).join('\n');
+  }
+
+  const parts: string[] = [];
+  parts.push(`TYPE DE MARCHÉ : ${marketType === 'public' ? 'Marché public (Code de la commande publique)' : 'Marché privé (contrat de prestations de services)'}`);
+  parts.push(`SECTEUR CLIENT : ${sector}`);
+  parts.push(`CADRE RÉGLEMENTAIRE : ${regulatory}`);
+  if (solutionsBlock) {
+    parts.push(`SOLUTIONS GSS DIFFÉRENCIANTES POUR CETTE SECTION :\n${solutionsBlock}`);
+  }
+  // Problématiques anticipées du DCE
+  const issues = analysisData?.anticipatedIssues || [];
+  if (issues.length > 0) {
+    parts.push(`PROBLÉMATIQUES ANTICIPÉES (non formulées par l'acheteur) :\n${issues.map((i: string, idx: number) => `${idx + 1}. ${i}`).join('\n')}`);
+  }
+  // Arguments différenciants
+  const strengths = analysisData?.proposalStrengths || [];
+  if (strengths.length > 0) {
+    parts.push(`ARGUMENTS DIFFÉRENCIANTS GSS :\n${strengths.map((s: string, idx: number) => `${idx + 1}. ${s}`).join('\n')}`);
+  }
+
+  return parts.join('\n\n');
+}
+
+// ─── Stratégie sur-mesure : déclinaison page par page ───
+
+/**
+ * « Beats » stratégiques de la synthèse sur-mesure (pages « Contexte sur mesure »), dans l'ordre de
+ * lecture. Chaque page reçoit un angle DISTINCT pour raconter une histoire cohérente plutôt que des
+ * paragraphes interchangeables. Sont distribués sur le nombre réel de zones via `assignBeats`.
+ */
+const STRATEGY_BEATS: string[] = [
+  "Compréhension du client et de son contexte + enjeux de sûreté propres à son profil (type d'organisation, usagers/parties prenantes, sites, rythme d'exploitation).",
+  "Notre stratégie de sûreté pour ce client : les axes différenciants retenus et pourquoi ils répondent précisément à ses enjeux.",
+  "Le dispositif au service de la stratégie : moyens humains qualifiés, encadrement et interlocuteur unique, moyens matériels et technologiques adaptés aux sites.",
+  "Pilotage, démarche qualité, réactivité et gestion des imprévus, engagement de continuité de service (sans conclusion générique).",
+];
+
+/** Assigne un beat à chacune des `n` zones (réutilise/condense la liste si n ≠ STRATEGY_BEATS.length). */
+function assignBeats(n: number): string[] {
+  if (n <= 0) return [];
+  if (n === STRATEGY_BEATS.length) return [...STRATEGY_BEATS];
+  // Mappage proportionnel : la zone i prend le beat le plus proche dans la liste de référence.
+  return Array.from({ length: n }, (_, i) =>
+    STRATEGY_BEATS[Math.min(STRATEGY_BEATS.length - 1, Math.floor((i * STRATEGY_BEATS.length) / n))]);
+}
+
 /** Détermine si un spread doit être personnalisé (on garde intactes les pages partenaires/références). */
 function shouldPersonalizeSpread(title: string): boolean {
   const n = normTitle(title);
@@ -1182,6 +1681,95 @@ export class MemoireGenerator {
     return null;
   }
 
+  // ─── Recherche sémantique (embeddings) : index Doc GSS + DCE, récupération par champ ───
+
+  /**
+   * Découpe la Documentation GSS (par catégorie) et le DCE (par pièce) en chunks indexables.
+   * Le DCE est assemblé en blocs « \n\n--- label ---\n<corps> » (cf. getDceContext) : on le
+   * redécoupe sur ces frontières pour étiqueter chaque chunk (CCTP, RC, annexe…).
+   */
+  private buildRetrievalChunks(gssDocs: Record<string, string>, dceContext: string): RetrievalChunk[] {
+    const chunks: RetrievalChunk[] = [];
+    const CHUNK = 1200, STEP = 1050;   // ~300 tokens/chunk, léger chevauchement
+    const pushChunks = (source: 'GSS' | 'DCE', label: string, text: string) => {
+      const clean = (text || '').replace(/\r\n/g, '\n');
+      for (let i = 0; i < clean.length; i += STEP) {
+        const slice = clean.slice(i, i + CHUNK);
+        if (slice.trim().length < 80) continue;
+        chunks.push({ source, label, text: slice });
+      }
+    };
+    for (const [cat, text] of Object.entries(gssDocs)) pushChunks('GSS', cat, text);
+    const re = /\n\n--- (.+?) ---\n/g;
+    let m: RegExpExecArray | null, lastIdx = 0, lastLabel = 'DCE';
+    while ((m = re.exec(dceContext)) !== null) {
+      if (m.index > lastIdx) pushChunks('DCE', lastLabel, dceContext.slice(lastIdx, m.index));
+      lastLabel = m[1]; lastIdx = re.lastIndex;
+    }
+    pushChunks('DCE', lastLabel, dceContext.slice(lastIdx));
+    return chunks;
+  }
+
+  /** Embeddings OpenAI par lots (retry/backoff sur 429). Renvoie un vecteur par texte d'entrée. */
+  private async embedTexts(texts: string[]): Promise<number[][]> {
+    const out: number[][] = [];
+    const BATCH = 96;
+    for (let i = 0; i < texts.length; i += BATCH) {
+      const batch = texts.slice(i, i + BATCH).map(t => (t && t.trim() ? t.slice(0, 8000) : ' '));
+      for (let attempt = 1; ; attempt++) {
+        try {
+          const resp = await this.openai.embeddings.create({ model: EMBED_MODEL, input: batch });
+          for (const d of resp.data) out.push(d.embedding as number[]);
+          break;
+        } catch (e: any) {
+          const status = e?.status || e?.code || '';
+          if (status === 429 && attempt < 5) {
+            const wait = 10000 * attempt;
+            console.warn(`[MemoireGenerator] Embeddings: 429 (TPM) — attente ${wait / 1000}s puis réessai (${attempt}/4)`);
+            await this.sleep(wait);
+            continue;
+          }
+          throw e;
+        }
+      }
+    }
+    return out;
+  }
+
+  /** Calcule et stocke l'embedding de chaque chunk de l'index. */
+  private async embedChunks(chunks: RetrievalChunk[]): Promise<void> {
+    const embs = await this.embedTexts(chunks.map(c => c.text));
+    chunks.forEach((c, i) => { c.embedding = embs[i]; });
+  }
+
+  /** Top-K chunks les plus proches d'un embedding de requête (similarité cosinus). */
+  private retrieve(queryEmb: number[], chunks: RetrievalChunk[], k: number): RetrievalChunk[] {
+    return chunks
+      .filter(c => c.embedding && c.embedding.length > 0)
+      .map(c => ({ c, score: cosine(queryEmb, c.embedding!) }))
+      .sort((a, b) => b.score - a.score)
+      .slice(0, k)
+      .map(x => x.c);
+  }
+
+  /**
+   * Requête de recherche d'un champ. La QUESTION propre du champ est le signal PRINCIPAL : on
+   * l'accentue (doublée) et on ÉCARTE le « Contexte proche » (= libellés des champs VOISINS), qui
+   * faisait dériver la recherche/réponse vers un sujet adjacent (ex. moyens d'accès au lieu du
+   * report des alarmes). À défaut de question (cellule de tableau), on prend l'intitulé Tableau.
+   */
+  private buildFieldQuery(f: { context: string }): string {
+    const grab = (re: RegExp) => (f.context.match(re) || [])[1] || '';
+    const question = grab(/Question:\s*"([^"]*)"/);
+    const section = grab(/Section:\s*"([^"]*)"/);
+    const table = grab(/Tableau:\s*([^|]*)/);
+    const core = (question || table).replace(/\[CHAMP_\d+\]/g, '').trim();
+    const base = core
+      ? `${core} ${core} ${section}`
+      : f.context.replace(/\[CHAMP_\d+\]/g, '').replace(/Contexte(?: proche)?:[^|]*/gi, ' ');
+    return base.replace(/["|]/g, ' ').replace(/\s{2,}/g, ' ').trim();
+  }
+
   /**
    * Phase d'ANALYSE structurée (inspirée de l'app de référence gss-app, personas Sacha / Mme Vaché).
    * À partir du DCE (CCTP, RC, rapport de visite terrain, annexes), produit un JSON `analysisData`
@@ -1195,10 +1783,13 @@ Ton process s'appuie sur deux rôles : Sacha (amont : analyse du DCE, vérificat
 
 Ta mission : analyser le CCTP, le RC, le rapport de visite terrain et les annexes pour en extraire, de façon structurée et exhaustive :
 1. Le donneur d'ordre, la durée du marché, les sites concernés.
-2. Les besoins en agents (effectifs en ETP, profils : CQP APS, SSIAP 1/2/3, encadrement) et le taux de reprise du personnel en place (annexes).
-3. Les contraintes matérielles (contrôle de rondes, pointeaux, PTI/DATI, tenues, véhicules).
-4. L'obligation de visite (RC) croisée avec le rapport de visite.
-5. Des "Arguments Différenciants" (forces de GSS) et des "Problématiques Anticipées" (risques techniques/humains non formulés par l'acheteur + la solution GSS associée).
+2. Le TYPE DE MARCHÉ : "public" (collectivité, université, hôpital, établissement public, CCAG, code de la commande publique) ou "privé" (entreprise, SAS, SARL, contrat de prestations) — IMPORTANT pour adapter le ton et les obligations légales.
+3. Le SECTEUR D'ACTIVITÉ du client (éducation, santé, industrie, distribution, événementiel, tertiaire, collectivité territoriale, etc.).
+4. Les besoins en agents (effectifs en ETP, profils : CQP APS, SSIAP 1/2/3, encadrement) et le taux de reprise du personnel en place (annexes).
+5. Les contraintes matérielles (contrôle de rondes, pointeaux, PTI/DATI, tenues, véhicules).
+6. L'obligation de visite (RC) croisée avec le rapport de visite.
+7. Des "Arguments Différenciants" (forces de GSS) et des "Problématiques Anticipées" (risques techniques/humains non formulés par l'acheteur + la solution GSS associée).
+8. Des "Recommandations stratégiques GSS" : pour chaque grand thème du mémoire (présentation, moyens humains, moyens opérationnels, moyens organisationnels), propose 2 à 3 arguments SPÉCIFIQUES à ce client que GSS devrait mettre en avant, en tenant compte du cadre public/privé.
 
 Tu renvoies un objet JSON valide et exhaustif.`;
 
@@ -1210,6 +1801,8 @@ Génère une réponse JSON valide respectant EXACTEMENT cette structure :
   "clientName": "Nom exact du donneur d'ordre (ex: Université de Rouen Normandie)",
   "projectTitle": "Intitulé complet du marché",
   "marketRef": "Référence du marché (ex: MP n°2026-08)",
+  "marketType": "public ou privé — déterminé d'après le DCE (CCAG, commande publique, collectivité → public ; SAS/SARL, contrat privé → privé)",
+  "clientSector": "Secteur d'activité du client (éducation, santé, industrie, distribution, événementiel, tertiaire, collectivité, résidentiel…)",
   "duration": "Durée exacte (ex: 1 an renouvelable 3 fois)",
   "lots": [ { "num": "1", "perimetre": "..." } ],
   "visitMandatory": true,
@@ -1225,7 +1818,13 @@ Génère une réponse JSON valide respectant EXACTEMENT cette structure :
   "legalRequirements": "Exigences d'autorisation (CNAPS, agréments dirigeants, agrément établissement local)",
   "keyRisks": [ "Risque/contrainte opérationnelle identifié" ],
   "proposalStrengths": [ "Argument différenciant technique de GSS pour ce marché" ],
-  "anticipatedIssues": [ "Problématique non formulée par l'acheteur + solution concrète GSS" ]
+  "anticipatedIssues": [ "Problématique non formulée par l'acheteur + solution concrète GSS" ],
+  "gssStrategicRecommendations": {
+    "presentation": "2-3 arguments spécifiques pour la présentation de GSS adaptés à CE client et CE cadre (public/privé)",
+    "moyensHumains": "2-3 arguments spécifiques sur les moyens humains adaptés aux besoins du client",
+    "moyensOperationnels": "2-3 arguments spécifiques sur les moyens opérationnels adaptés au secteur/sites",
+    "moyensOrganisationnels": "2-3 arguments spécifiques sur l'organisation adaptés au cadre contractuel (public/privé)"
+  }
 }`;
 
     const content = await this.callOpenAI(
@@ -1234,7 +1833,18 @@ Génère une réponse JSON valide respectant EXACTEMENT cette structure :
     );
     try {
       const data = JSON.parse(content || '{}');
-      console.log(`[MemoireGenerator] Analyse DCE: client="${data.clientName || '?'}", ${(data.sites || []).length} site(s), ${(data.anticipatedIssues || []).length} problématique(s) anticipée(s).`);
+      // Post-traitement : enrichir / valider les champs stratégiques via détection locale
+      // (le modèle peut se tromper sur public/privé ; la détection par mots-clés est plus fiable)
+      const detectedType = detectMarketType(data);
+      const detectedSector = detectClientSector(data);
+      data.marketType = data.marketType || detectedType;
+      data.clientSector = data.clientSector || detectedSector;
+      data.regulatoryFramework = buildRegulatoryFramework(
+        data.marketType === 'privé' || data.marketType === 'prive' ? 'prive' : 'public',
+        data.clientSector,
+        data,
+      );
+      console.log(`[MemoireGenerator] Analyse DCE: client="${data.clientName || '?'}", type=${data.marketType}, secteur="${data.clientSector}", ${(data.sites || []).length} site(s), ${(data.anticipatedIssues || []).length} problématique(s) anticipée(s), cadre réglementaire: ${(data.regulatoryFramework || '').slice(0, 80)}…`);
       return data;
     } catch (e) {
       console.error('[MemoireGenerator] Analyse DCE: parse JSON échoué, repli sur extrait brut.');
@@ -1335,6 +1945,15 @@ Génère une réponse JSON valide respectant EXACTEMENT cette structure :
     const dceContext = await this.getDceContext(dossierId);
     const analysisData = await this.analyzeDce(dceContext);
     const analysisJson = JSON.stringify(analysisData, null, 2);
+
+    // 2 bis. Connaissances GSS pour répondre au cadre client : on explore TOUS les sous-dossiers de
+    // la Documentation GSS (moyens, procédures, organisation…) + le dossier « Personnes » (référents).
+    // Le DCE reste le contexte primaire (les exigences) ; la Documentation GSS fournit la matière
+    // pour y répondre. Toute info absente de ces sources → champ laissé « [À COMPLÉTER] ».
+    const gssDocs = await this.getGssDocumentation();
+    const gssDocContext = this.buildFullGssContext(gssDocs);
+    const referentsContext = await this.getGssReferents();
+    console.log(`[MemoireGenerator] Contexte cadre client: ${Object.keys(gssDocs).length} catégorie(s) Doc GSS (${gssDocContext.length} chars) + référents (${referentsContext.length} chars).`);
 
     // 3. Load DOCX and parse XML DOM
     const content = fs.readFileSync(templatePath);
@@ -1451,7 +2070,10 @@ Génère une réponse JSON valide respectant EXACTEMENT cette structure :
           const hasText = cellInfos.some((c: any) => !c.isEmpty);
           const hasEmpty = cellInfos.some((c: any) => c.isEmpty);
           if (hasText && hasEmpty) {
-            cellInfos.forEach((cInfo: any) => {
+            cellInfos.forEach((cInfo: any, cellIdx: number) => {
+              // La 1re cellule d'une ligne est la colonne LIBELLÉ (intitulé de la ligne) : on ne la
+              // remplit jamais, même vide, pour ne pas écraser/inventer un en-tête de ligne.
+              if (cellIdx === 0) return;
               if (cInfo.isEmpty && !filledCells.has(cInfo.cell)) {
                 filledCells.add(cInfo.cell);
                 const cellContext = getTableCellContext(cInfo.cell, node);
@@ -1565,7 +2187,9 @@ Génère une réponse JSON valide respectant EXACTEMENT cette structure :
     if (prompts.length === 0) throw new Error("Aucun champ à remplir détecté dans le template Word.");
 
     const systemPrompt = `Tu es un rédacteur chevronné de mémoires techniques pour l'entreprise GSS (Global Security Service, ex-GIS), expert des marchés publics de sécurité privée.
-On te fournit l'ANALYSE stratégique et opérationnelle du marché (client, sites, exigences, rapport de visite de Sacha, arguments différenciants de GSS, problématiques terrain anticipées) et une liste de champs [CHAMP_X] repérés dans le cadre de réponse de l'acheteur. Tu rédiges la valeur à insérer dans chacun.
+On te fournit (1) l'ANALYSE stratégique et opérationnelle du marché issue du DCE (client, sites, exigences, rapport de visite de Sacha, arguments différenciants de GSS, problématiques terrain anticipées), (2) la DOCUMENTATION GSS (moyens, procédures, organisation, formations… — connaissances internes), (3) les RÉFÉRENTS GSS (dossier « Personnes ») et (4) une liste de champs [CHAMP_X] repérés dans le cadre de réponse de l'acheteur. Tu rédiges la valeur à insérer dans chacun.
+
+SOURCES À EXPLOITER (impératif) : pour CHAQUE champ, appuie-toi sur le DCE (ce que l'acheteur exige) ET sur la Documentation GSS (ce que GSS sait/fait pour y répondre). Pour un champ demandant un interlocuteur/référent/encadrant/contact, utilise les RÉFÉRENTS GSS (« Personnes »). AVANT de répondre, cherche réellement l'information dans CHAQUE bloc source fourni ci-dessous (EXTRAIT DU DCE PERTINENT, DOCUMENTATION GSS PERTINENTE *et* la liste « Autres catégories Doc GSS », RÉFÉRENTS GSS) : l'information y est souvent enfouie plus loin. N'écris EXACTEMENT "[À COMPLÉTER]" (plutôt que d'inventer) QUE si — et seulement si — après cette recherche l'information n'est présente NI dans le DCE, NI dans la Documentation GSS, NI dans les Référents.
 
 ══════════════════════════════════════
 RÈGLE N°0 — QUI EST QUI (NE JAMAIS CONFONDRE)
@@ -1579,7 +2203,7 @@ RÈGLE N°1 — FORMAT DE RÉPONSE (selon le tag de chaque champ)
 ══════════════════════════════════════
 [VALEUR COURTE]   → 1 à 6 mots, valeur brute factuelle (ex: "93 ETP", "Campus Pasteur", "Oui"). Pas de phrase d'intro.
 [LISTE]           → items séparés par "- " et un saut de ligne (ex: "- CQP APS\n- SSIAP 1").
-[PARAGRAPHE]      → paragraphe dense, technique et engageant (3 à 8 phrases développées) qui VEND GSS. Jamais de réponse paresseuse ("Conforme", "Disponible", "Oui").
+[PARAGRAPHE]      → paragraphe dense, technique et engageant (5 à 9 phrases développées) qui VEND GSS. Jamais de réponse paresseuse ("Conforme", "Disponible", "Oui"), jamais de généralité interchangeable. Chaque paragraphe doit suivre une logique STRATÉGIQUE : (1) nomme l'enjeu/risque PRÉCIS du client (issu de l'analyse, du CCTP ou de la visite terrain), (2) propose la réponse GSS DIFFÉRENCIANTE qui y répond (un moyen, une méthode, un engagement concret — pas un slogan), (3) explicite le BÉNÉFICE mesurable pour le client. Le lecteur doit sentir que GSS a compris SON enjeu, pas récité un argumentaire générique.
 [CASE A COCHER]   → UNIQUEMENT "☑" (GSS se conforme à 100%) ou "☐".
 JAMAIS de markdown (pas de **gras**, pas de #). Sauts de ligne et tirets simples uniquement.
 
@@ -1590,38 +2214,127 @@ RÈGLE N°2 — PERSONNALISATION (ce qui fait gagner)
 - Exploite les observations de la visite terrain (visitDetails) pour prouver notre connaissance du site.
 - Intègre les "proposalStrengths" et les "anticipatedIssues" (avec leur solution GSS) au cœur des [PARAGRAPHE], pour montrer que GSS anticipe des risques non formulés dans le CCTP.
 - Décris concrètement : organisation, contrôle CNAPS, gestion des plannings, rondes/pointeaux NFC, PTI/DATI, gestion des alarmes, remplacement d'agents.
+- VRAI AVANTAGE : ne te contente pas de "nous assurons X" — formule à chaque fois en quoi la manière GSS de faire X est SUPÉRIEURE (délai chiffré, taux de couverture, redondance, anticipation d'un risque que le concurrent ignore) et ce que le client y gagne concrètement.
 
 ══════════════════════════════════════
 RÈGLE N°3 — DONNÉES LÉGALES : NE JAMAIS INVENTER
 ══════════════════════════════════════
 Pour tout champ d'identité légale (SIRET, N° CNAPS, NOM du dirigeant, n° d'agrément dirigeant, dates
-d'obtention/validité, n° de certification, adresses, coordonnées/téléphone/email) : n'utilise QUE des
-valeurs présentes dans l'analyse/DCE. Sinon écris EXACTEMENT "[À COMPLÉTER]" (rien d'autre, pas de nom
-inventé type "Jean Dupont"). N'invente JAMAIS un nom, un numéro, une date, une adresse ou un contact.
+d'obtention/validité, n° de certification, adresses, coordonnées/téléphone/email) ou tout nom de référent :
+n'utilise QUE des valeurs présentes dans l'analyse/DCE, la Documentation GSS ou les Référents GSS
+(« Personnes »). Sinon écris EXACTEMENT "[À COMPLÉTER]" (rien d'autre, pas de nom inventé type
+"Jean Dupont"). N'invente JAMAIS un nom, un numéro, une date, une adresse ou un contact.
+ATTENTION SPÉCIFIQUE AUX COORDONNÉES : les RÉFÉRENTS GSS (« Personnes ») ne contiennent QUE des noms
+et des rôles — AUCUN téléphone, AUCUN email, AUCUNE adresse. Donc pour tout numéro de téléphone, email
+ou adresse postale qui n'est pas EXPLICITEMENT écrit dans les sources : écris "[À COMPLÉTER]". N'invente
+JAMAIS "01 23 45 67 89", "prenom.nom@gss.fr" ni une adresse type "123 Rue de la Sécurité, 75000 Paris".
+Pour un champ « coordonnées de l'interlocuteur », réponds le nom + rôle réel du référent puis
+"[À COMPLÉTER]" pour le téléphone/email (ex : "MARCHANI Adil, Directeur d'agence — tél/email : [À COMPLÉTER]").
+
+══════════════════════════════════════
+RÈGLE N°4 — CADRE RÉGLEMENTAIRE ET SOLUTIONS GSS SPÉCIFIQUES
+══════════════════════════════════════
+${(() => {
+  const mt = detectMarketType(analysisData);
+  const sec = detectClientSector(analysisData);
+  if (mt === 'public') return `Ce marché est un MARCHÉ PUBLIC (secteur : ${sec}).
+- Respecte le vocabulaire du Code de la commande publique : pouvoir adjudicateur, acheteur, titulaire, sous-critères.
+- Cite les articles pertinents du CCP et du CCAG-FCS quand approprié.
+- Mets en avant les garanties de conformité, les mécanismes de contrôle (pénalités contractuelles, réunions périodiques, rapports de suivi formalisés).
+- Souligne l'expérience de GSS auprès d'établissements publics similaires.
+- Intègre les obligations de transparence (plannings transmis, CVs anonymisés, extranet).`;
+  return `Ce marché est un MARCHÉ PRIVÉ (secteur : ${sec}).
+- Adopte un ton commercial plus direct et orienté résultats.
+- Mets en avant la flexibilité, la réactivité et les SLA sur mesure.
+- Souligne l'adaptation aux process internes et à la culture du client.
+- Propose des engagements chiffrés (délais de remplacement, taux de couverture, KPIs personnalisés).
+- Mentionne la possibilité de co-construction du dispositif avec le client.`;
+})()}
 
 FORMAT DE RÉPONSE : JSON valide uniquement → {"replacements": [ {"id": 1, "value": "..."} ]}`;
 
-    // 5. Traitement par lots. gpt-4o-mini (200k TPM) permet des lots plus gros → moins d'allers-retours.
-    const BATCH_SIZE = 20;
+    // Valeurs renvoyées par l'IA (une par champ [CHAMP_n]).
     const replacements: Array<{ id: number; value: string }> = [];
 
-    /** Appelle le modèle sur un sous-ensemble de champs et collecte les valeurs renvoyées. */
-    const runBatch = async (batchFields: FieldDesc[], label: string): Promise<void> => {
-      if (batchFields.length === 0) return;
-      const batchPrompts = batchFields.map(buildPrompt);
-      const hasParagraph = batchPrompts.some(p => p.includes('[PARAGRAPHE]'));
-      const temperature = hasParagraph ? 0.4 : 0.2;
+    /** Exécute des tâches avec une concurrence limitée (protège la limite TPM). */
+    const runPool = async (jobs: Array<() => Promise<void>>, limit: number): Promise<void> => {
+      let idx = 0;
+      const worker = async () => { while (idx < jobs.length) { const j = jobs[idx++]; await j(); } };
+      await Promise.all(Array.from({ length: Math.min(limit, jobs.length) }, worker));
+    };
 
-      const userPrompt = `Analyse du marché public (contexte unique de rédaction) :
+    // ── Remplissage QUESTION PAR QUESTION (recherche sémantique + 1 appel IA par champ) ──
+    // Chaque champ [CHAMP_n] est traité INDIVIDUELLEMENT : on recherche dans la Documentation GSS
+    // et le DCE (index d'embeddings) les passages réellement pertinents pour CE champ, puis on fait
+    // UN appel IA dédié pour rédiger sa valeur. Plus de blob générique partagé par 20 champs :
+    // chaque réponse est ancrée dans les bonnes sources (« fouiller là où il faut »).
+    const retrievalChunks = this.buildRetrievalChunks(gssDocs, dceContext);
+    await this.embedChunks(retrievalChunks);
+    const gssN = retrievalChunks.filter(c => c.source === 'GSS' && c.embedding).length;
+    const dceN = retrievalChunks.filter(c => c.source === 'DCE' && c.embedding).length;
+    console.log(`[MemoireGenerator] Index sémantique : ${gssN} chunks Doc GSS + ${dceN} chunks DCE.`);
+
+    // Embeddings de TOUTES les requêtes de champ en un lot → la récupération devient du calcul local.
+    const queryEmbs = await this.embedTexts(descriptors.map(d => this.buildFieldQuery(d)));
+    const queryEmbById = new Map<number, number[]>();
+    descriptors.forEach((d, i) => queryEmbById.set(d.id, queryEmbs[i]));
+
+    const strategicCtx = buildStrategicContext('', analysisData);
+
+    /** Traite UN champ : recherche ciblée des passages pertinents + 1 appel IA dédié. */
+    const answerField = async (f: FieldDesc): Promise<void> => {
+      const qEmb = queryEmbById.get(f.id);
+      const top = qEmb ? this.retrieve(qEmb, retrievalChunks, 8) : [];
+      const gssPassages = top.filter(c => c.source === 'GSS');
+      const dcePassages = top.filter(c => c.source === 'DCE');
+      const fmtBlock = (title: string, cs: RetrievalChunk[]) => cs.length
+        ? `\n--- ${title} ---\n` + cs.map((c, i) => `[${c.label} #${i + 1}]\n${c.text}`).join('\n\n') + '\n' : '';
+      // Champ qui demande EXPLICITEMENT une personne/contact. On se base sur la QUESTION du champ,
+      // pas sur tout le contexte : sinon le simple mot « responsable » d'un titre de section
+      // (« Plan qualité interne – responsable qualité ») fait recopier le nom du référent dans TOUS
+      // les champs de la section. Les référents ne sont injectés que pour ces champs-là.
+      const qMatch = f.context.match(/Question:\s*"([^"]*)"/);
+      const fieldAsk = qMatch ? qMatch[1] : f.context;
+      // On se base sur la QUESTION PROPRE du champ (pas tout le contexte) : c'est ce qui évite le flood
+      // (« VATTIER Marie » recopié partout) tout en injectant le référent là où il est VRAIMENT demandé.
+      // Un champ dont la question nomme un RÔLE (responsable qualité, directeur, référent…) ou demande
+      // un nom/coordonnées attend une personne → on lui fournit les Référents GSS (« Personnes »). Les
+      // champs vagues (question vide « : ») n'ont pas de rôle dans leur question → pas d'injection.
+      const isReferent = /\b(nom|noms|coordonn[ée]es|interlocuteur|courriel|r[ée]f[ée]rent|encadrant|dirigeant|directeur|directrice|g[ée]rant|pr[ée]sident|responsable)\b/i.test(fieldAsk);
+      const hint = buildPrompt(f);
+      const isParagraph = hint.includes('[PARAGRAPHE]');
+      // Champ d'IDENTITÉ / LÉGAL / CONTACT : valeur qui ne peut PAS se déduire, elle doit exister
+      // telle quelle dans les sources (nom de personne, SIRET/SIREN, CNAPS, agrément, certification,
+      // date, adresse, siège, téléphone, email). On y applique la règle stricte « verbatim ou rien ».
+      const isStrictId = /siret|siren|\bcnaps\b|agr[ée]ment|autorisation|certification|kbis|\bdate\b|adresse|si[èe]ge|d[ée]nomination|raison sociale|t[ée]l[ée]phone|\btel\b|email|\bmail\b|courriel|coordonn[ée]es/i.test(f.context)
+        || isReferent;
+
+      // Consigne adaptée au TYPE de champ — 3 niveaux :
+      //  1) [PARAGRAPHE] → argumentaire sur-mesure qui vend GSS (ce qui marche déjà bien) ;
+      //  2) champ COURT FACTUEL non-identité (effectif, taux, qualification, conformité, délai…) →
+      //     réponse BRÈVE, synthétisée À PARTIR des sources (on autorise le calcul/synthèse) ;
+      //  3) champ d'IDENTITÉ/LÉGAL/CONTACT → « verbatim ou [À COMPLÉTER] » : PAS DE DONNÉE INVENTÉE.
+      const instruction = isParagraph
+        ? `Rédige un paragraphe dense, technique et personnalisé qui répond précisément à l'attente de l'acheteur et met en avant la valeur ajoutée de GSS, en t'appuyant sur les extraits ci-dessus. N'invente aucune donnée factuelle (nom, date, numéro) absente des sources.`
+        : isStrictId
+          ? `Ce champ attend une donnée d'IDENTITÉ/LÉGALE/CONTACT précise. Donne UNIQUEMENT la valeur — aucune phrase, aucun argumentaire.
+RÈGLE ABSOLUE — AUCUNE DONNÉE INVENTÉE : la valeur (nom de personne, date, n° SIRET/SIREN, n° CNAPS, agrément, certification, adresse, téléphone, email) doit figurer EXPLICITEMENT dans les extraits ci-dessus (DCE, Documentation GSS ou Référents). Sinon écris EXACTEMENT "[À COMPLÉTER]" et RIEN d'autre. N'invente JAMAIS, ne déduis JAMAIS et n'utilise JAMAIS d'exemple générique (proscrits : "Jean Dupont", "01/01/2020", "01 23 45 67 89", "prenom.nom@gss.fr", un SIRET au hasard). En cas de doute → "[À COMPLÉTER]".`
+          : `Ce champ attend une réponse COURTE et FACTUELLE (quelques mots, une valeur, une liste, ou Oui/Non). Donne UNIQUEMENT la réponse — aucune phrase d'introduction, aucun argumentaire. Appuie-toi sur les extraits ci-dessus : tu peux SYNTHÉTISER ou recouper ce qu'ils contiennent (effectifs/ETP, qualifications requises, taux de reprise, délais, conformité…). N'invente AUCUNE donnée nominative, légale ou chiffrée (nom, date, SIRET, CNAPS, adresse, téléphone, email, montant) absente des sources : dans ce cas écris "[À COMPLÉTER]".`;
+
+      const userPrompt = `Analyse du marché (contexte de rédaction) :
 ${analysisJson}
 
-Liste des ${batchPrompts.length} champs à remplir (${label}) :
-${batchPrompts.join('\n')}
+--- CONTEXTE STRATÉGIQUE GSS ---
+${strategicCtx}
+${fmtBlock("EXTRAITS PERTINENTS DU DCE (exigences de l'acheteur)", dcePassages)}${fmtBlock('DOCUMENTATION GSS PERTINENTE (sources internes — appuie ta réponse dessus)', gssPassages)}${isReferent && referentsContext ? `\n--- RÉFÉRENTS GSS (« Personnes ») ---\n${referentsContext}\n` : ''}
+CHAMP UNIQUE À RÉDIGER :
+${hint}
 
-Renvoie uniquement un objet JSON valide contenant les ${batchPrompts.length} valeurs. CHAQUE champ listé ci-dessus doit être présent dans la réponse.`;
+${instruction}
+${fieldAsk && fieldAsk !== f.context ? `IMPORTANT — RESTE STRICTEMENT SUR LE SUJET DE CETTE QUESTION : « ${fieldAsk.trim()} ». N'utilise pas une information hors-sujet des extraits (ne réponds pas sur un thème VOISIN — ex. ne parle pas des moyens d'accès/clés si la question porte sur le report des alarmes). Si aucun extrait ne traite SPÉCIFIQUEMENT cette question, écris "[À COMPLÉTER]".\n` : ''}Renvoie UNIQUEMENT un objet JSON : {"id": ${f.id}, "value": "..."}`;
 
-      const approxTokens = Math.round((systemPrompt.length + userPrompt.length) / 4);
-      console.log(`[MemoireGenerator] ${label}: ${batchPrompts.length} champs, temp=${temperature}, ~${approxTokens} tokens`);
+      const temperature = isParagraph ? 0.4 : isStrictId ? 0.1 : 0.2;
+      const label = `Champ ${f.id}`;
       const aiResponse = await this.callOpenAI(
         [{ role: 'system', content: systemPrompt }, { role: 'user', content: userPrompt }],
         temperature, label, true,
@@ -1629,60 +2342,201 @@ Renvoie uniquement un objet JSON valide contenant les ${batchPrompts.length} val
       if (aiResponse === null) return;
       try {
         const data = JSON.parse(aiResponse || '{}');
-        const batchResults: Array<{ id: number; value: string }> = data.replacements || [];
-        replacements.push(...batchResults);
-        console.log(`[MemoireGenerator] ${label}: ${batchResults.length} valeurs renvoyées.`);
+        const value = data.value ?? (Array.isArray(data.replacements) ? data.replacements[0]?.value : undefined);
+        if (value !== undefined && value !== null) replacements.push({ id: f.id, value: String(value) });
       } catch (e) {
-        console.error(`[MemoireGenerator] ${label}: parse JSON échoué:`, (aiResponse || '').slice(0, 200));
+        console.error(`[MemoireGenerator] ${label}: parse JSON échoué:`, (aiResponse || '').slice(0, 160));
       }
     };
 
-    const totalBatches = Math.ceil(descriptors.length / BATCH_SIZE);
-    console.log(`[MemoireGenerator] Traitement de ${descriptors.length} champs en ${totalBatches} lot(s) parallèles...`);
-    // Lots indépendants lancés en parallèle (200k TPM / 10k RPM le permettent largement).
-    await Promise.all(
-      Array.from({ length: totalBatches }, (_, i) =>
-        runBatch(descriptors.slice(i * BATCH_SIZE, (i + 1) * BATCH_SIZE), `Lot ${i + 1}/${totalBatches}`)
-      )
-    );
+    // Concurrence 2 : chaque appel porte l'analyse + extraits ; au-delà on sature la TPM (30k) du compte.
+    console.log(`[MemoireGenerator] Rédaction question par question de ${descriptors.length} champs...`);
+    await runPool(descriptors.map(d => () => answerField(d)), 2);
 
-    // Passe de complétion : rattrape les champs sans valeur (lot ayant échoué ou oubli du modèle)
+    // Passe de complétion : rattrape les champs sans valeur (appel ayant échoué).
     const answeredIds = new Set(replacements.map(r => r.id));
     const missing = descriptors.filter(d => !answeredIds.has(d.id));
     if (missing.length > 0) {
       console.log(`[MemoireGenerator] Passe de complétion : ${missing.length} champ(s) manquant(s).`);
-      const nComp = Math.ceil(missing.length / BATCH_SIZE);
-      await Promise.all(
-        Array.from({ length: nComp }, (_, i) =>
-          runBatch(missing.slice(i * BATCH_SIZE, (i + 1) * BATCH_SIZE), `Complétion ${i + 1}`)
-        )
-      );
+      await runPool(missing.map(d => () => answerField(d)), 2);
     }
 
     console.log(`[MemoireGenerator] GPT a renvoyé ${replacements.length} valeurs au total.`);
 
-    // Garde-fou anti-invention : pour les champs légaux (SIRET, CNAPS, agrément, dates
-    // d'autorisation, adresses), toute valeur dont les chiffres n'apparaissent pas dans les
-    // sources réelles est remplacée par [À COMPLÉTER]. Indépendant du modèle (mini invente parfois).
-    const sourceDigits = (analysisJson + ' ' + dceContext).replace(/\D/g, '');
-    const isLegalField = (ctx: string) => /siret|cnaps|n. d.autorisation|numero d.autorisation|agrement dirigeant|date d.obtention|date de validite|adresse du siege|adresse de l.agence/.test(normCtx(ctx));
-    const guardLegal = (val: string, ctx: string): string => {
-      if (!isLegalField(ctx)) return val;
-      const digitRuns = val.match(/\d{3,}/g) || [];
-      const unverified = digitRuns.some(d => !sourceDigits.includes(d));
-      if (unverified) {
-        console.log(`[MemoireGenerator] Garde-fou: valeur légale non vérifiée → [À COMPLÉTER] (ctx: ${ctx.slice(0, 60)})`);
-        return '[À COMPLÉTER]';
+    // ── Garde-fou anti-invention de DONNÉES FACTUELLES (le cœur du « pas de données inventées ») ──
+    // Le LLM fabrique volontiers adresses, téléphones, emails, dates, n° SIRET/CNAPS plausibles.
+    // On vérifie TOUTE donnée factuelle contre les sources réelles (DCE + Doc GSS + « Personnes ») :
+    //  • champ d'IDENTITÉ stricte (SIRET, CNAPS, agrément, date, adresse, certification) → si un
+    //    chiffre ou un email n'est pas dans les sources, la valeur entière devient [À COMPLÉTER] ;
+    //  • champ de CONTACT (coordonnées, téléphone, email, interlocuteur) → on retire UNIQUEMENT le
+    //    téléphone/email inventé (en gardant le nom réel du référent), le reste passe par guardNames.
+    const sourceTextNorm = normCtx(analysisJson + ' ' + dceContext + ' ' + gssDocContext + ' ' + referentsContext);
+    const sourceDigits = sourceTextNorm.replace(/\D/g, '');
+    const EMAIL_RE = /[\w.+-]+@[\w.-]+\.[a-zA-Z]{2,}/g;
+    const PHONE_RE = /\+?\d(?:[\d ().\-]{7,})\d/g;     // n° téléphone (≥9 chiffres espacés/groupés)
+    const digitsKnown = (s: string) => { const d = s.replace(/\D/g, ''); return d.length < 3 || sourceDigits.includes(d); };
+    const isStrictIdentity = (ctx: string) => /siret|siren|\bcnaps\b|autorisation|agrement|certification|\bdate\b|adresse|siege|kbis/.test(normCtx(ctx));
+    const isContactField = (ctx: string) => /coordonnees|telephone|\btel\b|\bemail\b|\bmail\b|courriel|interlocuteur|contact|renseignements/.test(normCtx(ctx));
+    const guardFactual = (val: string, ctx: string): string => {
+      const nctx = normCtx(ctx);
+      // Champ d'identité stricte : toute valeur contenant un chiffre/email non sourcé → [À COMPLÉTER].
+      if (isStrictIdentity(nctx)) {
+        const emails = val.match(EMAIL_RE) || [];
+        const digitRuns = val.match(/\d{3,}/g) || [];
+        const invented = emails.some(e => !sourceTextNorm.includes(normCtx(e))) || digitRuns.some(d => !sourceDigits.includes(d));
+        if (invented) {
+          console.log(`[MemoireGenerator] Garde-fou identité: valeur non sourcée → [À COMPLÉTER] (ctx: ${ctx.slice(0, 60)})`);
+          return '[À COMPLÉTER]';
+        }
+        return val;
+      }
+      // Champ de contact : on neutralise seulement les téléphones/emails inventés (on garde le nom).
+      if (isContactField(nctx)) {
+        return val
+          .replace(EMAIL_RE, e => sourceTextNorm.includes(normCtx(e)) ? e : '[À COMPLÉTER]')
+          .replace(PHONE_RE, p => digitsKnown(p) ? p : '[À COMPLÉTER]');
       }
       return val;
     };
+
+    // Garde-fou anti-invention de NOMS de personnes ("c'est qui Jean Dupont ?") : tout nom propre
+    // de personne présent dans une valeur générée mais ABSENT des sources réelles (DCE + Doc GSS +
+    // fichier « Personnes ») est remplacé par [À COMPLÉTER]. On ne se fie donc PAS au LLM pour les
+    // noms : seuls les référents/contacts effectivement présents dans tes données peuvent ressortir.
+    const sourceNamesNorm = sourceTextNorm;
+    // Sigles/organisations en capitales : ne JAMAIS traiter comme des personnes (sinon faux positifs).
+    const NAME_STOPLIST = new Set(['gss', 'gis', 'cctp', 'ccap', 'ccag', 'fcs', 'cnaps', 'apsad', 'ssiap',
+      'cqp', 'aps', 'sst', 'dati', 'pti', 'erp', 'icpe', 'zrr', 'rgpd', 'tva', 'siret', 'siren', 'kbis',
+      'place', 'aws', 'dc1', 'dc2', 'noti1', 'noti2', 'pca', 'ppms', 'poi', 'rse', 'iso', 'mac', 'nfc',
+      'qr', 'sla', 'kpi', 'etp', 'pc', 'gtc']);
+    // Mots-indices d'une personne : permettent de repérer un nom même en casse normale ("Pierre Martin").
+    const CUE = `(?:M\\.|Mme|Mr\\.?|Monsieur|Madame|Dr\\.?|interlocuteur|responsable|directeur|directrice|contact|r[ée]f[ée]rent|dirigeant|g[ée]rant|pr[ée]sident|pr[ée]sidente|chef|encadrant|nomm[ée]|assur[ée])`;
+    // Un nom = 2 mots Capitalisés (l'un peut être en CAPITALES : convention NOM Prénom).
+    const NAME = `[A-ZÀ-Ÿ][\\wÀ-ÿ'’-]+\\s+[A-ZÀ-Ÿ][\\wÀ-ÿ'’-]+`;
+    // Détecte un nom SOIT précédé d'un indice (cas casse normale), SOIT en convention CAPITALES/Capitale.
+    const PERSON_NAME_RE = new RegExp(
+      `(?:${CUE}[\\s,’'-]+)(${NAME})` +                                       // indice + Prénom Nom
+      `|\\b([A-ZÀ-Ÿ]{2,}(?:[-'’][A-ZÀ-Ÿ]+)*\\s+[A-ZÀ-Ÿ][a-zà-ÿ][\\wà-ÿ'’-]*)` + // NOM Prénom
+      `|\\b([A-ZÀ-Ÿ][a-zà-ÿ][\\wà-ÿ'’-]*\\s+[A-ZÀ-Ÿ]{2,}(?:[-'’][A-ZÀ-Ÿ]+)*)\\b`, // Prénom NOM
+      'g');
+    /** Vrai si CHAQUE composant du nom (≥3 lettres) est présent dans les sources (ordre indifférent). */
+    const nameInSources = (name: string): boolean => {
+      const tokens = normCtx(name).split(/[\s,’'-]+/).filter((t) => t.length >= 3 && !NAME_STOPLIST.has(t));
+      if (tokens.length === 0) return true;                       // que des sigles/initiales → on laisse
+      return tokens.every((t) => sourceNamesNorm.includes(t));
+    };
+    const guardNames = (val: string): string =>
+      val.replace(PERSON_NAME_RE, (full, cued, nomFirst, nomLast) => {
+        const name = (cued || nomFirst || nomLast || '').trim();   // partie « nom » réellement capturée
+        if (!name || nameInSources(name)) return full;             // nom présent dans tes données → OK
+        console.log(`[MemoireGenerator] Garde-fou noms: "${name}" absent des sources → [À COMPLÉTER]`);
+        // On ne remplace QUE le nom, en préservant l'éventuel mot-indice qui le précède.
+        return full.replace(name, '[À COMPLÉTER]');
+      });
+
+    // Garde-fou « placeholders » : (1) normalise un "[À COMPLÉTER]" mal formé (ex. "À COMPLÉTER"
+    // sans crochets, renvoyé par le modèle) ; (2) neutralise les EXEMPLES-TYPES que le LLM glisse
+    // parfois malgré la consigne — faux noms/dates/numéros que guardNames/guardFactual ne couvrent
+    // pas toujours (ex. "Jean Dupont" en Titlecase sans mot-indice). → [À COMPLÉTER].
+    // Inclut les exemples factices du CADRE CLIENT lui-même (le template contient des valeurs de
+    // démonstration — faux nom, fausse date, faux n° séquentiel — que le modèle recopie comme si
+    // elles étaient sourcées, puisqu'elles figurent dans le DCE). On les neutralise explicitement.
+    const FAKE_VALUE_RE = /\bjean\s+dupont\b|\bjohn\s+doe\b|prenom\.nom@|\b01\s?23\s?45\s?67\s?89\b|\b01\/01\/2020\b|\b123\s?456\s?789\b|\b987\s?654\s?321\b/gi;
+    const guardPlaceholders = (val: string, ctx = ''): string => {
+      let v = val.trim();
+      if (!v) return '';   // valeur volontairement vidée (ligne parasite) → reste VIDE, pas « [À COMPLÉTER] »
+      if (/^\[?\s*[àa]\s*compl[ée]ter\s*\]?\.?$/i.test(v)) return '[À COMPLÉTER]';
+      v = v.replace(FAKE_VALUE_RE, '[À COMPLÉTER]');
+      // Canonicalise les placeholders bracketés (le modèle templatise parfois plusieurs emplacements :
+      // « Nom, N° agrément — Nom / N° » → « [À COMPLÉTER], [À COMPLÉTER] — [À COMPLÉTER] / [À COMPLÉTER] »).
+      v = v.replace(/\[\s*[àa]\s*compl[ée]ter\s*\]/gi, '[À COMPLÉTER]');
+      // Si, une fois retirés les placeholders et les séparateurs, il ne reste RIEN d'utile → un seul.
+      const meaningful = v.replace(/\[À COMPLÉTER\]/g, '').replace(/[\s,;:/|.\-—–()]+/g, '');
+      if (!meaningful) return '[À COMPLÉTER]';
+      // Fusionne les séquences de placeholders séparés par de la simple ponctuation.
+      v = v.replace(/\[À COMPLÉTER\](?:\s*[,;/|—–-]+\s*\[À COMPLÉTER\])+/g, '[À COMPLÉTER]');
+      // Il reste ≥2 placeholders → le modèle a recopié la STRUCTURE de la question avec des libellés
+      // intermédiaires (« [À COMPLÉTER] / Date d'obtention de l'autorisation : [À COMPLÉTER] »). On
+      // n'en garde qu'UN SEUL : on ne conserve que le texte qui n'est PAS un libellé déjà dans la
+      // question (ex. un vrai nom de référent), et on termine par un unique [À COMPLÉTER].
+      if ((v.match(/\[À COMPLÉTER\]/g) || []).length >= 2) {
+        // Comparaison robuste : on ignore ponctuation/apostrophes/espaces (le libellé recopié et la
+        // question ont parfois des apostrophes différentes) → "d'obtention" ≡ "d obtention".
+        const alnum = (s: string) => normCtx(s).replace(/[^a-z0-9]+/g, '');
+        const qn = alnum(ctx);
+        const realParts = v.split(/\[À COMPLÉTER\]/)
+          .map(s => s.replace(/^[\s,;:/|.\-—–()]+|[\s,;:/|.\-—–()]+$/g, '').trim())
+          .filter(s => { const ns = alnum(s); return ns.length >= 3 && !qn.includes(ns); });
+        return realParts.length ? `${realParts.join(' ')} [À COMPLÉTER]` : '[À COMPLÉTER]';
+      }
+      return v;
+    };
+
+    // ── Lignes-réponse PARASITES (sur-découpage du cadre client) ──
+    // Sous un libellé, le gabarit a souvent PLUSIEURS lignes pointillées : seule la 1re est la vraie
+    // zone de réponse (son champ porte le libellé comme « Question: »). Les suivantes sont détectées
+    // comme des champs-réponse SANS question propre (« Question: \":\" » ou vide) → ce sont des lignes
+    // EN TROP du gabarit, pas de vraies questions. On n'y laisse AUCUN texte IA : on remet la valeur à
+    // VIDE → seul subsiste ce qui était DÉJÀ dans le template de référence (le « : » et les pointillés
+    // sont des runs d'origine, conservés). On ne touche ni aux cellules de tableau ni aux cases.
+    {
+      const valById = new Map<number, string>(replacements.map(r => [r.id, String(r.value)]));
+      let cleared = 0;
+      for (const d of descriptors) {
+        if (d.kind !== 'answer') continue;
+        const q = (d.context.match(/Question:\s*"([^"]*)"/) || [])[1] || '';
+        const qClean = q.replace(/[\s.:;,…\-—–/|()]+/g, '');   // question « vide » une fois la ponctuation retirée
+        if (qClean.length === 0 && (valById.get(d.id) ?? '').trim()) { valById.set(d.id, ''); cleared++; }
+      }
+      if (cleared) console.log(`[MemoireGenerator] Lignes parasites vidées (réponse sans question propre): ${cleared}`);
+      replacements.forEach(r => { if (valById.has(r.id)) r.value = valById.get(r.id)!; });
+    }
+
+    // ── Déduplication des zones SUR-DÉCOUPÉES ──
+    // Certaines zones de réponse (lignes pointillées consécutives sous un même libellé, ou plusieurs
+    // cellules vides d'une même ligne de tableau) sont détectées comme PLUSIEURS champs → elles
+    // reçoivent la même valeur, qui se répète en cascade dans le document. Deux dédoublonnages :
+    //  • VALEURS RÉDIGÉES identiques au contexte identique → on garde la 1re, on vide les suivantes ;
+    //  • « [À COMPLÉTER] » purs → une seule fois par LIGNE/zone (même ligne de tableau ou même
+    //    question) : inutile d'écrire « [À COMPLÉTER] » dans chaque case vide d'une même ligne.
+    {
+      const dedupSig = (ctx: string) => normCtx(ctx.replace(/\[CHAMP_\d+\]/g, ''));
+      // Signature « ligne/zone » (plus grossière) pour regrouper les [À COMPLÉTER] d'une même ligne.
+      const lineSig = (ctx: string) => {
+        const section = (ctx.match(/Section:\s*"([^"]*)"/) || [])[1] || '';
+        const ligne = (ctx.match(/Ligne:\s*"([^"]*)"/) || [])[1];      // cellules d'une même ligne de tableau
+        const question = (ctx.match(/Question:\s*"([^"]*)"/) || [])[1]; // lignes d'une même zone de réponse
+        return normCtx(section + '||' + (ligne ?? question ?? ''));
+      };
+      const isPureBlank = (v: string) => /^\[?\s*[àa]\s*compl[ée]ter\s*\]?\.?$/i.test(v.trim());
+      const valById = new Map<number, string>(replacements.map(r => [r.id, String(r.value)]));
+      const seenVal = new Map<string, Set<string>>();   // valeurs rédigées déjà vues (par contexte complet)
+      const blankLines = new Set<string>();             // lignes/zones portant déjà un [À COMPLÉTER]
+      for (const d of descriptors.slice().sort((a, b) => a.id - b.id)) {
+        if (d.kind === 'checkbox') continue;
+        const v = (valById.get(d.id) ?? '').trim();
+        if (!v) continue;
+        if (isPureBlank(v)) {
+          const ls = lineSig(d.context);
+          if (blankLines.has(ls)) { valById.set(d.id, ''); console.log(`[MemoireGenerator] [À COMPLÉTER] en trop vidé: CHAMP_${d.id} (même ligne)`); }
+          else blankLines.add(ls);
+          continue;
+        }
+        const sig = dedupSig(d.context);
+        const set = seenVal.get(sig) ?? seenVal.set(sig, new Set()).get(sig)!;
+        const nv = normCtx(v);
+        if (set.has(nv)) { valById.set(d.id, ''); console.log(`[MemoireGenerator] Doublon vidé: CHAMP_${d.id} (même contexte/valeur)`); }
+        else set.add(nv);
+      }
+      replacements.forEach(r => { if (valById.has(r.id)) r.value = valById.get(r.id)!; });
+    }
 
     // 6. Apply replacements in the DOM
     let applied = 0;
     replacements.forEach((rep: any) => {
       const desc = descriptors.find(d => d.id === rep.id);
       if (!desc) return;
-      const value = guardLegal(String(rep.value), desc.context);
+      const value = guardPlaceholders(guardNames(guardFactual(String(rep.value), desc.context)), desc.context);
       const isChecked = value.includes('☑') || value.toLowerCase() === 'oui' || value.toLowerCase() === 'yes' || value === '1' || value === 'true';
 
       if (desc.type === 'text') {
@@ -2023,6 +2877,8 @@ Renvoie uniquement un objet JSON valide contenant les ${batchPrompts.length} val
 
     for (const entry of fs.readdirSync(gssDir, { withFileTypes: true })) {
       if (!entry.isDirectory()) continue;
+      // Le dossier « Personnes » (référents GSS) est chargé à part via getGssReferents().
+      if (entry.name.toLowerCase() === 'personnes') continue;
       const catDir = path.join(gssDir, entry.name);
       let catText = '';
 
@@ -2049,28 +2905,133 @@ Renvoie uniquement un objet JSON valide contenant les ${batchPrompts.length} val
   }
 
   /**
-   * Trouve les catégories de Documentation GSS pertinentes pour un titre de spread donné,
-   * par correspondance de mots-clés dans GSS_DOC_KEYWORDS.
+   * Concatène TOUTE la Documentation GSS (toutes les catégories/sous-dossiers) en un seul
+   * contexte de connaissances budgétisé, pour le remplissage d'un cadre client : chaque champ
+   * du formulaire doit pouvoir être renseigné à partir de ce que GSS sait faire. Plafonné par
+   * catégorie ET globalement pour rester sous la limite TPM.
    */
-  private matchGssCategories(spreadTitle: string, availableCategories: string[]): string[] {
+  private buildFullGssContext(gssDocs: Record<string, string>, perCatCap = 2500, totalCap = 24_000): string {
+    let ctx = '';
+    for (const [cat, text] of Object.entries(gssDocs)) {
+      if (ctx.length >= totalCap) break;
+      ctx += `\n\n=== Doc GSS : ${cat} ===\n${text.slice(0, perCatCap)}`;
+    }
+    return ctx.length > totalCap ? ctx.slice(0, totalCap) + '\n[… tronqué …]' : ctx;
+  }
+
+  /**
+   * Charge la liste des RÉFÉRENTS GSS depuis « Template/Documentation GSS/Personnes » (interlocuteurs
+   * uniques, encadrants, contacts, dirigeants). « Personnes » peut être SOIT un fichier texte simple
+   * (un référent par ligne, sans extension), SOIT un dossier de fiches (pdf/docx/doc/txt) : les deux
+   * cas sont gérés. Renvoie le texte concaténé (budgétisé) ou '' si absent/vide — dans ce dernier cas
+   * les champs « référent » resteront « [À COMPLÉTER] » plutôt qu'inventés.
+   */
+  private async getGssReferents(): Promise<string> {
+    const target = path.join(this.templateDir, 'Documentation GSS', 'Personnes');
+    if (!fs.existsSync(target)) {
+      console.warn('[MemoireGenerator] « Personnes » (référents GSS) introuvable:', target);
+      return '';
+    }
+
+    const CAP = 12_000;
+    /** Lit un fichier : texte brut s'il n'a pas d'extension exploitable, sinon via extractText. */
+    const readOne = async (filePath: string): Promise<string> => {
+      try {
+        if (/\.(pdf|docx?)$/i.test(filePath)) return await extractText(filePath);
+        return fs.readFileSync(filePath, 'utf8'); // .txt ou fichier sans extension (liste texte)
+      } catch (e: any) {
+        console.warn(`[MemoireGenerator] Référents: impossible de lire ${path.basename(filePath)}: ${e.message}`);
+        return '';
+      }
+    };
+
+    let out = '';
+    if (fs.statSync(target).isDirectory()) {
+      for (const file of fs.readdirSync(target)) {
+        const text = (await readOne(path.join(target, file))).trim();
+        if (text.length > 30) out += `\n--- ${file} ---\n${text}`;
+      }
+    } else {
+      out = (await readOne(target)).trim();
+    }
+
+    out = out.trim();
+    if (out.length > CAP) out = out.slice(0, CAP) + '\n[… tronqué …]';
+    console.log(`[MemoireGenerator] Référents GSS (Personnes): ${out.length} chars chargés.`);
+    return out;
+  }
+
+  /**
+   * Trouve les catégories de Documentation GSS pertinentes pour un titre de spread donné,
+   * par correspondance de mots-clés dans GSS_DOC_KEYWORDS. Si `analysisData` est fourni,
+   * les catégories sont pondérées par pertinence au secteur du client (ex : FORMATION
+   * prioritaire pour l'éducation, PROCEDURE pour l'industrie).
+   */
+  private matchGssCategories(spreadTitle: string, availableCategories: string[], analysisData?: any): string[] {
     const n = normTitle(spreadTitle);
-    const matches: string[] = [];
+
+    // Score de base : correspondance titre ↔ mots-clés de la catégorie
+    const scored: Array<{ cat: string; score: number }> = [];
 
     for (const [cat, keywords] of Object.entries(GSS_DOC_KEYWORDS)) {
       if (!availableCategories.includes(cat)) continue;
-      if (keywords.some(kw => n.includes(kw))) matches.push(cat);
+      let score = 0;
+      for (const kw of keywords) {
+        if (n.includes(kw)) score += 2;
+      }
+      if (score > 0) scored.push({ cat, score });
     }
 
     // Fallback : correspondance par mots du titre dans les noms de catégories
-    if (matches.length === 0) {
+    if (scored.length === 0) {
       const words = n.split(' ').filter(w => w.length > 3);
       for (const cat of availableCategories) {
         const catNorm = normTitle(cat);
-        if (words.some(w => catNorm.includes(w))) matches.push(cat);
+        if (words.some(w => catNorm.includes(w))) scored.push({ cat, score: 1 });
       }
     }
 
-    return matches.slice(0, 4); // 4 catégories max par section
+    // Bonus sectoriel : prioriser les catégories pertinentes au secteur du client
+    if (analysisData) {
+      const sector = detectClientSector(analysisData).toLowerCase();
+      const sectorBoosts: Record<string, string[]> = {
+        'education': ['FORMATION', 'FORMATION INTERNE', 'SUIVI QUALITE ET CONTROLES', 'PROCEDURE'],
+        'enseignement': ['FORMATION', 'FORMATION INTERNE', 'SUIVI QUALITE ET CONTROLES', 'PROCEDURE'],
+        'sante': ['PROCEDURE', 'FORMATION', 'TENUES', 'SUIVI QUALITE ET CONTROLES'],
+        'hospitalier': ['PROCEDURE', 'FORMATION', 'TENUES', 'SUIVI QUALITE ET CONTROLES'],
+        'industrie': ['PROCEDURE', 'MATERIEL', 'TENUES', 'FORMATION'],
+        'logistique': ['PROCEDURE', 'MATERIEL', "MOYENS D'ACCES", 'PLANNIFICATION'],
+        'distribution': ["MOYENS D'ACCES", 'PROCEDURE', 'TENUES', 'MATERIEL'],
+        'commerce': ["MOYENS D'ACCES", 'PROCEDURE', 'TENUES', 'MATERIEL'],
+        'evenementiel': ['PLANNIFICATION', 'PROCEDURE', 'MATERIEL', 'EFFECTIFS ET ORGANIGRAMME'],
+        'culture': ['PLANNIFICATION', 'PROCEDURE', 'MATERIEL', 'EFFECTIFS ET ORGANIGRAMME'],
+        'transport': ['PROCEDURE', 'MATERIEL', "MOYENS D'ACCES", 'SUIVI QUALITE ET CONTROLES'],
+        'collectivite': ['MANAGEMENT', 'SUIVI QUALITE ET CONTROLES', 'ENGAGEMENT ECOLOGIQUE', 'VALEURS'],
+        'residentiel': ['PROCEDURE', 'INTERLOCUTEUR UNIQUE', 'PLANNIFICATION', "MOYENS D'ACCES"],
+      };
+      for (const [sectorKey, boostedCats] of Object.entries(sectorBoosts)) {
+        if (sector.includes(sectorKey)) {
+          for (const s of scored) {
+            if (boostedCats.includes(s.cat)) s.score += 1;
+          }
+          break;
+        }
+      }
+
+      // Bonus marché public : prioriser MANAGEMENT et SUIVI QUALITE
+      const marketType = detectMarketType(analysisData);
+      if (marketType === 'public') {
+        for (const s of scored) {
+          if (['MANAGEMENT', 'SUIVI QUALITE ET CONTROLES', 'ENGAGEMENT ECOLOGIQUE', 'VALEURS'].includes(s.cat)) {
+            s.score += 1;
+          }
+        }
+      }
+    }
+
+    // Tri par score décroissant, 4 catégories max
+    scored.sort((a, b) => b.score - a.score);
+    return scored.slice(0, 4).map(s => s.cat);
   }
 
   /**
@@ -2145,15 +3106,21 @@ Renvoie uniquement un objet JSON valide contenant les ${batchPrompts.length} val
     const totalCapacity = totalLines * CHARS_PER_LINE_2COL;
     console.log(`[MemoireGenerator] ${zones.length} zone(s) « Contexte sur mesure » (début/fin), ${totalLines} ligne(s) réservée(s), capacité ~${totalCapacity} caractères. Génération IA de la synthèse...`);
     const targetWords = Math.max(400, Math.round(totalCapacity / 6.5)); // ~6.5 car/mot
+    const marketType = detectMarketType(analysisData);
+    const clientSector = detectClientSector(analysisData);
+    const strategicCtx = buildStrategicContext('presentation', analysisData);
     const systemPrompt = `Tu es un expert en sécurité privée chez GSS. Rédige une "Synthèse de l'offre" complète (environ ${targetWords} mots) qui sera ajoutée en introduction du mémoire technique.
 - Basé UNIQUEMENT sur l'analyse du DCE et les atouts GSS.
 - Personnalise un maximum pour le client : nom, sites, enjeux, risques anticipés.
 - Mets en avant l'accompagnement GSS (interlocuteur unique, qualité, réactivité).
+- CADRE DU MARCHÉ : Ce marché est un marché ${marketType === 'public' ? 'PUBLIC — utilise le vocabulaire de la commande publique (pouvoir adjudicateur, titulaire, sous-critères), cite les obligations du CCP et mets en avant les garanties de conformité et la transparence' : 'PRIVÉ — adopte un ton commercial direct, mets en avant la flexibilité, les SLA sur mesure et l\'adaptation aux process internes du client'}. Secteur : ${clientSector}.
+- STRATÉGIE : chaque paragraphe doit démontrer que GSS a COMPRIS L'ENJEU du client. Structure-le ainsi : (1) l'enjeu/risque concret de CE client (issu de l'analyse), (2) la réponse GSS DIFFÉRENCIANTE qui y répond (un moyen, une méthode ou engagement précis, pas un slogan), (3) le bénéfice tangible pour le client. Propose un VRAI AVANTAGE, pas une promesse interchangeable.
+- INTÈGRE les solutions GSS spécifiques fournies dans le contexte stratégique ci-dessous. Ce sont des arguments concrets et vérifiés que tu dois reformuler naturellement dans le texte.
 - Rédige plusieurs paragraphes bien développés (un paragraphe par idée, séparés par un saut de ligne).
 - IMPORTANT : N'utilise AUCUNE liste à puces (aucun tiret, aucun bullet point, aucun symbole). Rédige UNIQUEMENT sous forme de texte continu en paragraphes complets. Pas de markdown.
 - Le ton doit être professionnel, rassurant et très commercial (vendre l'offre).`;
 
-    const userPrompt = `ANALYSE DU MARCHÉ (DCE) :\n${analysisJson}\n\nATOUTS GSS (Extrait doc) :\n${gssContext}\n\nRédige le texte de la synthèse de notre offre sur mesure pour ce client.`;
+    const userPrompt = `ANALYSE DU MARCHÉ (DCE) :\n${analysisJson}\n\n--- CONTEXTE STRATÉGIQUE GSS (solutions spécifiques à ce client ${marketType}) ---\n${strategicCtx}\n\nATOUTS GSS (Extrait doc) :\n${gssContext}\n\nRédige le texte de la synthèse de notre offre sur mesure pour ce client.`;
 
     const generatedText = await this.callOpenAI(
       [{ role: 'system', content: systemPrompt }, { role: 'user', content: userPrompt }],
@@ -2189,6 +3156,79 @@ Renvoie uniquement un objet JSON valide contenant les ${batchPrompts.length} val
   }
 
   /**
+   * Construit, en UN appel IA, une stratégie de sûreté propre au client puis le texte de CHAQUE page
+   * de synthèse (un angle distinct par page, cf. STRATEGY_BEATS). L'entrée est `analysisData` (compact),
+   * PAS le DCE brut → prompt léger (évite la limite TPM). Réutilise les helpers de profilage existants
+   * (type marché, secteur, cadre réglementaire, solutions GSS) et active enfin keyRisks /
+   * gssStrategicRecommendations. Renvoie { profile, stakes[], axes[], pages[] } avec pages.length == nZones.
+   */
+  private async buildClientStrategy(
+    analysisData: any, nZones: number, gssContext: string, perZoneCapWords: number[],
+  ): Promise<{ profile: string; stakes: string[]; axes: string[]; pages: string[] }> {
+    const clientName = analysisData?.clientName || 'le client';
+    const sites: string[] = (analysisData?.sites || []).map((s: any) => (s?.name || '').trim()).filter(Boolean);
+    const marketType = detectMarketType(analysisData);
+    const sector = detectClientSector(analysisData);
+    const regulatory = buildRegulatoryFramework(marketType, sector, analysisData);
+    const strategicCtx = buildStrategicContext('presentation', analysisData);
+    const beats = assignBeats(nZones);
+
+    const pagesSpec = beats.map((b, i) =>
+      `Page ${i + 1} (~${perZoneCapWords[i] ?? 180} mots) — ANGLE : ${b}`).join('\n');
+
+    const systemPrompt = `Tu es un expert en sûreté/sécurité privée chez GSS (Global Security Service). Tu prépares la "Synthèse de notre offre sur mesure" d'un mémoire technique, à partir de l'analyse d'un DCE.
+
+DÉMARCHE OBLIGATOIRE :
+1) COMPRENDS le client : déduis son TYPE d'organisation, sa mission, ses USAGERS et parties prenantes (ex. université publique → étudiants, enseignants, personnels, visiteurs, campus multi-sites, calendrier universitaire, vie nocturne ; hôpital → patients, soignants, urgences 24/7 ; site industriel → ouvriers, ICPE, flux logistiques…), et les caractéristiques de ses sites.
+2) DÉDUIS les ENJEUX de sûreté SPÉCIFIQUES à ce profil (pas génériques).
+3) POSE 3 à 4 AXES STRATÉGIQUES différenciants GSS qui répondent précisément à ces enjeux.
+4) RÉDIGE le texte de CHAQUE page selon l'angle imposé ci-dessous, en t'appuyant sur le profil et les axes.
+
+RÈGLES DE RÉDACTION (champ "pages") :
+- Marché ${marketType === 'public' ? 'PUBLIC : vocabulaire de la commande publique, obligations du CCP, conformité, transparence, pénalités' : 'PRIVÉ : ton commercial, flexibilité, SLA sur mesure, adaptation aux process internes'}. Secteur : ${sector}.
+- PERSONNALISE : cite le nom du client (${clientName})${sites.length ? ` et ses sites (${sites.slice(0, 6).join(', ')})` : ''}, ses enjeux réels.
+- Chaque paragraphe = (1) enjeu PRÉCIS du client → (2) réponse GSS différenciante (un moyen, une méthode, un engagement chiffré) → (3) bénéfice concret. Jamais de slogan vague ni de texte recyclable pour un autre marché.
+- Reste COHÉRENT avec les axes posés. Respecte l'angle de chaque page (pas de redite d'une page à l'autre).
+- AUCUN markdown, puce, symbole ni titre : uniquement du texte rédigé continu. Pas de conclusion générique.
+- Vise le nombre de mots indiqué par page (remplir le cadre sans le dépasser largement).
+
+Réponds en JSON valide : { "profile": string, "stakes": string[], "axes": string[], "pages": string[] } où pages a EXACTEMENT ${nZones} éléments (1 par page, dans l'ordre).`;
+
+    const userPrompt = `ANALYSE DU MARCHÉ (DCE) :
+${JSON.stringify(analysisData, null, 2).slice(0, 30_000)}
+
+--- CONTEXTE STRATÉGIQUE GSS (cadre ${marketType}) ---
+${strategicCtx}
+
+CADRE RÉGLEMENTAIRE : ${regulatory}
+
+ATOUTS GSS (extraits doc) :
+${(gssContext || '').slice(0, 12_000)}
+
+PLAN DES PAGES (un angle distinct par page) :
+${pagesSpec}
+
+Rends le JSON décrit (profile, stakes, axes, pages[${nZones}]).`;
+
+    const content = await this.callOpenAI(
+      [{ role: 'system', content: systemPrompt }, { role: 'user', content: userPrompt }],
+      0.5, 'Stratégie client + texte par page', true,
+    );
+    let parsed: any = {};
+    try { parsed = JSON.parse(content || '{}'); } catch { parsed = {}; }
+    let pages: string[] = Array.isArray(parsed.pages) ? parsed.pages.map((p: any) => String(p || '').trim()) : [];
+    // Garantir EXACTEMENT nZones entrées (le remplissage par zone l'exige).
+    if (pages.length > nZones) pages = pages.slice(0, nZones);
+    while (pages.length < nZones) pages.push('');
+    return {
+      profile: String(parsed.profile || '').trim(),
+      stakes: Array.isArray(parsed.stakes) ? parsed.stakes.map((s: any) => String(s || '').trim()).filter(Boolean) : [],
+      axes: Array.isArray(parsed.axes) ? parsed.axes.map((s: any) => String(s || '').trim()).filter(Boolean) : [],
+      pages,
+    };
+  }
+
+  /**
    * Génère le mémoire en SUPERPOSANT la synthèse IA sur AO RNE.pdf (design figé) : le texte est
    * dessiné dans le cadre délimité par les balises « Contexte sur mesure début/fin » (pages 5–8),
    * en 2 colonnes, sans déborder. Aucun reflux possible → la mise en page reste intacte. Sortie PDF.
@@ -2199,7 +3239,6 @@ Renvoie uniquement un objet JSON valide contenant les ${batchPrompts.length} val
     // 1. Analyse DCE + contexte GSS (mêmes sources que la génération docx).
     const dceContext = await this.getDceContext(dossierId);
     const analysisData = await this.analyzeDce(dceContext);
-    const analysisJson = JSON.stringify(analysisData, null, 2);
     const clientName = analysisData?.clientName || 'le client';
 
     const gssDocs = await this.getGssDocumentation();
@@ -2215,32 +3254,19 @@ Renvoie uniquement un objet JSON valide contenant les ${batchPrompts.length} val
     const pdfBuffer = fs.readFileSync(pdfPath);
     const fontBytes = loadTrebuchetFont();
     const cap = await measureZonesCapacity(pdfBuffer, fontBytes);
-    // Léger SUR-remplissage (×1.15) : on génère un peu plus que la capacité pour que CHAQUE page se
-    // remplisse jusqu'en bas (le surplus éventuel est tronqué zone par zone par l'overlay).
-    const targetWords = Math.max(700, Math.round((cap.totalLines * cap.charsPerLine) / 6.5 * 1.15)); // ~6.5 car/mot
-    // Plusieurs paragraphes par page : gpt-4o-mini tient mieux des paragraphes courts nombreux que de
-    // gros blocs uniques → volume réellement produit bien plus proche de la cible → pages bien remplies.
     const nZones = Math.max(1, cap.zones);
-    const paraPerZone = 3;
-    const nPara = nZones * paraPerZone;
-    console.log(`[MemoireGenerator] Capacité des cadres : ${cap.zones} zone(s), ${cap.totalLines} ligne(s), ~${cap.charsPerLine} car/ligne → cible ~${targetWords} mots / ${nPara} paragraphes.`);
+    // Budget de mots PAR zone (capacité réelle du cadre, ~6.5 car/mot, marge anti-débordement) → chaque
+    // page est dimensionnée indépendamment ; le surplus éventuel est tronqué zone par zone par l'overlay.
+    const perZoneCapWords = (cap.perZoneLines.length ? cap.perZoneLines : [cap.totalLines])
+      .map((lines) => Math.max(60, Math.round((lines * cap.charsPerLine) / 6.5 * 0.95)));
+    console.log(`[MemoireGenerator] Capacité des cadres : ${cap.zones} zone(s), ${cap.totalLines} ligne(s), ~${cap.charsPerLine} car/ligne → cibles/page (mots) : [${perZoneCapWords.join(', ')}].`);
 
-    // 3. Génération du texte : étoffé pour REMPLIR entièrement chaque page de synthèse, SANS conclusion.
-    const systemPrompt = `Tu es un expert en sécurité privée chez GSS. Rédige une "Synthèse de notre offre sur mesure" (environ ${targetWords} mots) qui s'affichera sur ${nZones} pages de présentation, à remplir ENTIÈREMENT.
-- Basé UNIQUEMENT sur l'analyse du DCE et les atouts GSS fournis.
-- PERSONNALISE FORTEMENT pour ce client : cite explicitement son nom, ses sites, ses enjeux et les risques anticipés (issus de l'analyse), puis montre comment le dispositif GSS sur mesure y répond (interlocuteur unique, démarche qualité, réactivité, moyens humains et matériels adaptés).
-- Rédige ${nPara} paragraphes autonomes et bien développés (plusieurs par page), séparés par une ligne vide, chacun d'environ ${Math.round(targetWords / nPara)} mots. Chaque page doit être REMPLIE de haut en bas, sans espace vide.
-- Couvre des angles VARIÉS et complémentaires (compréhension du contexte, dispositif humain, encadrement et interlocuteur unique, moyens matériels et technologiques, démarche qualité et contrôles, réactivité et gestion des imprévus, transition/mise en place) pour produire assez de matière SANS te répéter.
-- AUCUNE liste à puces, aucun symbole, aucun markdown, aucun titre : uniquement du texte continu rédigé.
-- NE TERMINE PAS par une conclusion ni une phrase de synthèse finale : pas de paragraphe de conclusion.
-- Ton professionnel, concret, rassurant et commercial.`;
-    const userPrompt = `ANALYSE DU MARCHÉ (DCE) :\n${analysisJson}\n\nATOUTS GSS (Extrait doc) :\n${gssContext}\n\nRédige le texte de la synthèse de notre offre sur mesure pour ce client.`;
-
-    const generatedText = await this.callOpenAI(
-      [{ role: 'system', content: systemPrompt }, { role: 'user', content: userPrompt }],
-      0.5, 'Génération Synthèse (PDF)', false,
-    );
-    if (!generatedText) throw new Error('Échec de la génération IA de la synthèse.');
+    // 3. Stratégie sur-mesure + texte PAR PAGE : l'IA comprend le profil du client (type, usagers,
+    //    enjeux), pose des axes, puis rédige un angle DISTINCT par page (cf. STRATEGY_BEATS).
+    const strat = await this.buildClientStrategy(analysisData, nZones, gssContext, perZoneCapWords);
+    const zoneTexts = strat.pages;
+    if (!zoneTexts.some((t) => t.trim())) throw new Error('Échec de la génération IA de la synthèse (stratégie vide).');
+    console.log(`[MemoireGenerator] Stratégie client : profil="${strat.profile.slice(0, 90)}…", ${strat.axes.length} axe(s) [${strat.axes.map((a) => a.slice(0, 40)).join(' | ')}], ${zoneTexts.filter((t) => t.trim()).length}/${nZones} page(s) rédigée(s).`);
 
     // 4. Personnalisation des références figées (ancien client/sites → DCE) par masque+redraw.
     //    On ne touche QUE des occurrences bien délimitées (listes de sites, libellés « BASÉ À »),
@@ -2248,21 +3274,21 @@ Renvoie uniquement un objet JSON valide contenant les ${batchPrompts.length} val
     const siteNames: string[] = (analysisData?.sites || [])
       .map((s: any) => (s?.name || '').trim()).filter(Boolean);
     const refCtx: RefContext = { sites: siteNames, client: clientName, marketRef: analysisData?.marketRef || '' };
-    const mainSite = siteNames[0] || clientName;
+    // IMPORTANT : on NE réécrit PAS la localisation des pages « Ils nous ont fait confiance » (CESI,
+    // QRM…) ni la ville des CV agents. Ce sont des FAITS réels (références passées, agents basés à Rouen) :
+    // les remplacer par les sites du prospect les rend faux et fait « référence retouchée », ce qui dessert
+    // l'offre. On ne corrige donc QUE les fuites manifestes de l'ancien template vers le client du marché.
     const replacements: RefReplacement[] = [
-      // p28 : « : Rouen, Caen, Lille » → liste des sites du marché
-      { match: /:\s*Rouen\s*,\s*Caen\s*,\s*Lille/i, build: (c) => `: ${c.sites.slice(0, 3).join(', ') || c.client}` },
-      // p34 : « : Rouen Stade Diochon » → 1er site du marché
-      { match: /:\s*Rouen\s+Stade\s+Diochon/i, build: () => `: ${mainSite}` },
-      // p107-109 : « BASÉ À: ROUEN » → ville/site principal (majuscules). On reconstruit l'item
-      // entier (il est redessiné depuis son origine), donc on garde le préfixe « BASÉ ».
-      { match: /BAS\w*\s*À\s*:\s*ROUEN/i, build: () => `BASÉ À: ${mainSite.toUpperCase()}` },
+      // Fuite template : « …sites de Carrefour Mondeville » (phrase de présentation des contrôleurs) → client du DCE.
+      { match: /Carrefour\s+Mondeville/gi, build: (c) => c.client },
     ];
 
     // 5. Overlay sur AO RNE.pdf (réutilise le buffer/police déjà chargés) + remplacements de références.
     //    Les passages SURLIGNÉS sont traités séparément, en Python (voir étape 6).
+    // Remplissage PAR ZONE : la page i reçoit zoneTexts[i] (angle dédié), bornée à la capacité du cadre.
+    const synthesisChars = zoneTexts.reduce((s, t) => s + t.length, 0);
     const { bytes, zonesUsed, linesDrawn, truncated, refsReplaced } =
-      await overlaySynthesis(pdfBuffer, generatedText, fontBytes, replacements, refCtx);
+      await overlaySynthesis(pdfBuffer, zoneTexts.join('\n\n'), fontBytes, replacements, refCtx, [], { zoneTexts, docTitle: `AO ${clientName}` });
 
     const outputFileName = `Mémoire technique GSS_${Date.now()}.pdf`;
     const outputPath = path.join(this.responseDir, outputFileName);
@@ -2289,7 +3315,7 @@ Renvoie uniquement un objet JSON valide contenant les ${batchPrompts.length} val
     //   : { zones: 0, filled: 0 };
     const img = { zones: 0, filled: 0 };
 
-    console.log(`[MemoireGenerator] Synthèse superposée : ${generatedText.length} car. sur ${zonesUsed} zone(s), ${linesDrawn} ligne(s) dessinée(s)${truncated ? ', surplus tronqué' : ''}, ${refsReplaced} référence(s) client/sites + ${ph.replaced} balise(s) <entreprise> + ${hl.filled}/${hl.regions} passage(s) surligné(s) réécrit(s) + ${img.filled}/${img.zones} cadre(s) image rempli(s) [Python] → ${outputPath}`);
+    console.log(`[MemoireGenerator] Synthèse superposée : ${synthesisChars} car. sur ${zonesUsed} zone(s), ${linesDrawn} ligne(s) dessinée(s)${truncated ? ', surplus tronqué' : ''}, ${refsReplaced} référence(s) client/sites + ${ph.replaced} balise(s) <entreprise> + ${hl.filled}/${hl.regions} passage(s) surligné(s) réécrit(s) + ${img.filled}/${img.zones} cadre(s) image rempli(s) [Python] → ${outputPath}`);
 
     return {
       filePath: outputPath,
@@ -2300,7 +3326,7 @@ Renvoie uniquement un objet JSON valide contenant les ${batchPrompts.length} val
         balises_entreprise: `${ph.replaced}`,
         passages_surlignes: `${hl.filled}/${hl.regions}`,
         cadres_image: `${img.filled}/${img.zones}`,
-        texte_genere: `${generatedText.length} caractères`,
+        texte_genere: `${synthesisChars} caractères`,
       },
     };
   }
