@@ -1763,7 +1763,12 @@ export class MemoireGenerator {
     const question = grab(/Question:\s*"([^"]*)"/);
     const section = grab(/Section:\s*"([^"]*)"/);
     const table = grab(/Tableau:\s*([^|]*)/);
-    const core = (question || table).replace(/\[CHAMP_\d+\]/g, '').trim();
+    // Zone « …… » sans question propre (« : ») : on prend le LIBELLÉ qui la PRÉCÈDE (dernier segment
+    // du « Contexte proche »), pour comprendre/rechercher sur ce qui est réellement demandé juste avant.
+    const near = grab(/Contexte(?: proche)?:\s*"([^"]*)"/);
+    const nearLast = near.split('/').map(s => s.trim()).filter(Boolean).pop() || '';
+    const qReal = question.replace(/[\s.:;,…\-—–/|()]+/g, '').length ? question : '';
+    const core = (qReal || table || nearLast).replace(/\[CHAMP_\d+\]/g, '').trim();
     const base = core
       ? `${core} ${core} ${section}`
       : f.context.replace(/\[CHAMP_\d+\]/g, '').replace(/Contexte(?: proche)?:[^|]*/gi, ' ');
@@ -2281,6 +2286,28 @@ FORMAT DE RÉPONSE : JSON valide uniquement → {"replacements": [ {"id": 1, "va
 
     const strategicCtx = buildStrategicContext('', analysisData);
 
+    // ── Référents par RÔLE (fichier « Personnes » : « NOM Prénom — Rôle1 / Rôle2 ») ──
+    // Demande utilisateur : dès qu'un libellé nomme un RÔLE connu (« responsable qualité » →
+    // VATTIER Marie, « directeur d'agence » → MARCHANI Adil…), on place LE bon référent de façon
+    // DÉTERMINISTE (sans laisser le modèle choisir / inventer).
+    const referentRoles: Array<{ name: string; role: string; roleNorm: string }> = [];
+    for (const line of referentsContext.split(/\r?\n/)) {
+      const m = line.match(/^\s*(.+?)\s+[—–-]\s+(.+?)\s*$/);
+      if (!m) continue;
+      for (const role of m[2].split('/')) {
+        const r = role.trim();
+        const rn = normCtx(r);
+        if (rn.length >= 8) referentRoles.push({ name: m[1].trim(), role: r, roleNorm: rn });
+      }
+    }
+    referentRoles.sort((a, b) => b.roleNorm.length - a.roleNorm.length);  // rôle le plus spécifique d'abord
+    /** Si le libellé mentionne un RÔLE connu d'un référent → « NOM — Rôle », sinon ''. */
+    const referentForLabel = (label: string): string => {
+      const n = normCtx(label);
+      for (const { name, role, roleNorm } of referentRoles) if (n.includes(roleNorm)) return `${name} — ${role}`;
+      return '';
+    };
+
     /** Traite UN champ : recherche ciblée des passages pertinents + 1 appel IA dédié. */
     const answerField = async (f: FieldDesc): Promise<void> => {
       const qEmb = queryEmbById.get(f.id);
@@ -2293,16 +2320,28 @@ FORMAT DE RÉPONSE : JSON valide uniquement → {"replacements": [ {"id": 1, "va
       // pas sur tout le contexte : sinon le simple mot « responsable » d'un titre de section
       // (« Plan qualité interne – responsable qualité ») fait recopier le nom du référent dans TOUS
       // les champs de la section. Les référents ne sont injectés que pour ces champs-là.
-      const qMatch = f.context.match(/Question:\s*"([^"]*)"/);
-      const fieldAsk = qMatch ? qMatch[1] : f.context;
-      // On se base sur la QUESTION PROPRE du champ (pas tout le contexte) : c'est ce qui évite le flood
-      // (« VATTIER Marie » recopié partout) tout en injectant le référent là où il est VRAIMENT demandé.
-      // Un champ dont la question nomme un RÔLE (responsable qualité, directeur, référent…) ou demande
-      // un nom/coordonnées attend une personne → on lui fournit les Référents GSS (« Personnes »). Les
-      // champs vagues (question vide « : ») n'ont pas de rôle dans leur question → pas d'injection.
-      const isReferent = /\b(nom|noms|coordonn[ée]es|interlocuteur|courriel|r[ée]f[ée]rent|encadrant|dirigeant|directeur|directrice|g[ée]rant|pr[ée]sident|responsable)\b/i.test(fieldAsk);
+      const qRaw = (f.context.match(/Question:\s*"([^"]*)"/) || [])[1] || '';
+      const ctxNear = (f.context.match(/Contexte(?: proche)?:\s*"([^"]*)"/) || [])[1] || '';
+      const qEmpty = qRaw.replace(/[\s.:;,…\-—–/|()]+/g, '').length === 0;
+      // Zone « …… » sans question propre : pour COMPRENDRE ce qu'il faut écrire, on lit le LIBELLÉ qui
+      // la précède dans le document (dernier segment du contexte proche). C'est ce libellé qu'on cherche
+      // à remplir.
+      const precedingLabel = ctxNear.split('/').map(s => s.trim()).filter(Boolean).pop() || '';
+      const fieldAsk = ((qEmpty ? precedingLabel : qRaw) || qRaw || precedingLabel).trim();
+      // isReferent reste basé sur la VRAIE question (qRaw) — PAS sur le libellé précédent : sinon le
+      // nom du référent (« VATTIER Marie ») se réinjecterait dans toutes les lignes « …… » d'une
+      // section « responsable qualité » (le flood qu'on a corrigé). On l'injecte là où une personne
+      // est explicitement demandée par le libellé propre du champ.
+      const isReferent = /\b(nom|noms|coordonn[ée]es|interlocuteur|courriel|r[ée]f[ée]rent|encadrant|dirigeant|directeur|directrice|g[ée]rant|pr[ée]sident|responsable)\b/i.test(qRaw);
       const hint = buildPrompt(f);
       const isParagraph = hint.includes('[PARAGRAPHE]');
+
+      // RÔLE NOMMÉ → RÉFÉRENT déterministe : si le libellé du champ mentionne un rôle connu
+      // (« responsable qualité » → VATTIER Marie…), on place LE référent et on s'arrête là — sauf
+      // pour un [PARAGRAPHE] (là on laisse le modèle rédiger, le référent restant injecté en contexte).
+      const refMatch = referentForLabel(fieldAsk);
+      if (refMatch && !isParagraph) { replacements.push({ id: f.id, value: refMatch }); return; }
+
       // Champ d'IDENTITÉ / LÉGAL / CONTACT : valeur qui ne peut PAS se déduire, elle doit exister
       // telle quelle dans les sources (nom de personne, SIRET/SIREN, CNAPS, agrément, certification,
       // date, adresse, siège, téléphone, email). On y applique la règle stricte « verbatim ou rien ».
@@ -2319,7 +2358,7 @@ FORMAT DE RÉPONSE : JSON valide uniquement → {"replacements": [ {"id": 1, "va
         : isStrictId
           ? `Ce champ attend une donnée d'IDENTITÉ/LÉGALE/CONTACT précise. Donne UNIQUEMENT la valeur — aucune phrase, aucun argumentaire.
 RÈGLE ABSOLUE — AUCUNE DONNÉE INVENTÉE : la valeur (nom de personne, date, n° SIRET/SIREN, n° CNAPS, agrément, certification, adresse, téléphone, email) doit figurer EXPLICITEMENT dans les extraits ci-dessus (DCE, Documentation GSS ou Référents). Sinon écris EXACTEMENT "[À COMPLÉTER]" et RIEN d'autre. N'invente JAMAIS, ne déduis JAMAIS et n'utilise JAMAIS d'exemple générique (proscrits : "Jean Dupont", "01/01/2020", "01 23 45 67 89", "prenom.nom@gss.fr", un SIRET au hasard). En cas de doute → "[À COMPLÉTER]".`
-          : `Ce champ attend une réponse COURTE et FACTUELLE (quelques mots, une valeur, une liste, ou Oui/Non). Donne UNIQUEMENT la réponse — aucune phrase d'introduction, aucun argumentaire. Appuie-toi sur les extraits ci-dessus : tu peux SYNTHÉTISER ou recouper ce qu'ils contiennent (effectifs/ETP, qualifications requises, taux de reprise, délais, conformité…). N'invente AUCUNE donnée nominative, légale ou chiffrée (nom, date, SIRET, CNAPS, adresse, téléphone, email, montant) absente des sources : dans ce cas écris "[À COMPLÉTER]".`;
+          : `Ce champ attend une réponse COURTE et FACTUELLE (quelques mots, une valeur, une liste, ou Oui/Non). Donne UNIQUEMENT la réponse — aucune phrase d'introduction, aucun argumentaire. Appuie-toi sur les extraits ci-dessus : tu peux SYNTHÉTISER ou recouper ce qu'ils contiennent (effectifs/ETP, qualifications requises, taux de reprise, délais, conformité…). Si l'information n'est que PARTIELLE, donne une réponse PARTIELLE avec ce qui est disponible (mieux qu'une case vide) — sans inventer de donnée nominative, légale ou chiffrée (nom, date, SIRET, CNAPS, adresse, téléphone, email, montant) absente des sources. N'écris "[À COMPLÉTER]" QUE si AUCUNE information utile n'est disponible sur ce point.`;
 
       const userPrompt = `Analyse du marché (contexte de rédaction) :
 ${analysisJson}
@@ -2331,7 +2370,7 @@ CHAMP UNIQUE À RÉDIGER :
 ${hint}
 
 ${instruction}
-${fieldAsk && fieldAsk !== f.context ? `IMPORTANT — RESTE STRICTEMENT SUR LE SUJET DE CETTE QUESTION : « ${fieldAsk.trim()} ». N'utilise pas une information hors-sujet des extraits (ne réponds pas sur un thème VOISIN — ex. ne parle pas des moyens d'accès/clés si la question porte sur le report des alarmes). Si aucun extrait ne traite SPÉCIFIQUEMENT cette question, écris "[À COMPLÉTER]".\n` : ''}Renvoie UNIQUEMENT un objet JSON : {"id": ${f.id}, "value": "..."}`;
+${fieldAsk && fieldAsk !== f.context ? `${qEmpty ? `Cette zone à remplir (les pointillés « … ») fait suite, dans le document, au libellé qui la PRÉCÈDE : « ${fieldAsk} ». LIS ce libellé pour comprendre ce qui est attendu et remplis la zone en conséquence.` : `RESTE SUR LE SUJET DE CETTE QUESTION : « ${fieldAsk} ».`} Ne réponds pas sur un thème VOISIN (ex. ne parle pas des moyens d'accès/clés si le sujet est le report des alarmes). Si les extraits apportent une information MÊME PARTIELLE sur CE sujet, donne une réponse (au moins partielle) fondée dessus plutôt que de laisser vide — sans rien inventer. N'écris "[À COMPLÉTER]" QUE si rien d'utile sur ce sujet n'est disponible.\n` : ''}Renvoie UNIQUEMENT un objet JSON : {"id": ${f.id}, "value": "..."}`;
 
       const temperature = isParagraph ? 0.4 : isStrictId ? 0.1 : 0.2;
       const label = `Champ ${f.id}`;
@@ -2349,9 +2388,74 @@ ${fieldAsk && fieldAsk !== f.context ? `IMPORTANT — RESTE STRICTEMENT SUR LE S
       }
     };
 
-    // Concurrence 2 : chaque appel porte l'analyse + extraits ; au-delà on sature la TPM (30k) du compte.
-    console.log(`[MemoireGenerator] Rédaction question par question de ${descriptors.length} champs...`);
-    await runPool(descriptors.map(d => () => answerField(d)), 2);
+    // ── Regroupement en ZONES de réponse ──
+    // Une QUESTION/libellé ouvre une zone ; les lignes « …… » SANS question propre qui suivent en
+    // font partie JUSQU'À la prochaine question (ou une case/un tableau, qui cassent la zone). Pour
+    // une zone de PLUSIEURS lignes, on génère en UN SEUL appel N éléments DISTINCTS (un par ligne)
+    // plutôt que N réponses indépendantes qui se répètent. (Doc order = ordre des id.)
+    const qRealOf = (d: FieldDesc): string => {
+      const q = (d.context.match(/Question:\s*"([^"]*)"/) || [])[1] || '';
+      return q.replace(/[\s.:;,…\-—–/|()]+/g, '').length ? q.trim() : '';
+    };
+    const precedingLabelOf = (d: FieldDesc): string =>
+      ((d.context.match(/Contexte(?: proche)?:\s*"([^"]*)"/) || [])[1] || '')
+        .split('/').map(s => s.trim()).filter(Boolean).pop() || '';
+    interface AnswerZone { label: string; fields: FieldDesc[]; }
+    const zones: AnswerZone[] = [];
+    let curZone: AnswerZone | null = null;
+    for (const d of descriptors) {
+      if (d.kind !== 'answer') { curZone = null; continue; }   // case/tableau → casse la zone
+      const qReal = qRealOf(d);
+      if (qReal) { curZone = { label: qReal, fields: [d] }; zones.push(curZone); }
+      else if (curZone) { curZone.fields.push(d); }            // ligne « …… » → suite de la zone
+      else { curZone = { label: precedingLabelOf(d), fields: [d] }; zones.push(curZone); }
+    }
+
+    /** Rédige une zone MULTI-lignes en 1 appel : N éléments distincts (un par ligne), lus du libellé. */
+    const answerZone = async (zone: AnswerZone): Promise<void> => {
+      const primary = zone.fields[0];
+      const qEmb = queryEmbById.get(primary.id);
+      const top = qEmb ? this.retrieve(qEmb, retrievalChunks, 8) : [];
+      const fmtBlock = (title: string, cs: RetrievalChunk[]) => cs.length
+        ? `\n--- ${title} ---\n` + cs.map((c, i) => `[${c.label} #${i + 1}]\n${c.text}`).join('\n\n') + '\n' : '';
+      const N = zone.fields.length;
+      const isRef = /\b(nom|coordonn[ée]es|interlocuteur|courriel|r[ée]f[ée]rent|encadrant|dirigeant|directeur|directrice|responsable)\b/i.test(zone.label);
+      const userPrompt = `Analyse du marché (contexte de rédaction) :
+${analysisJson}
+
+--- CONTEXTE STRATÉGIQUE GSS ---
+${strategicCtx}
+${fmtBlock("EXTRAITS PERTINENTS DU DCE (exigences de l'acheteur)", top.filter(c => c.source === 'DCE'))}${fmtBlock('DOCUMENTATION GSS PERTINENTE (sources internes — appuie ta réponse dessus)', top.filter(c => c.source === 'GSS'))}${isRef && referentsContext ? `\n--- RÉFÉRENTS GSS (« Personnes ») ---\n${referentsContext}\n` : ''}
+LIBELLÉ / QUESTION À TRAITER : « ${zone.label} »
+Sous ce libellé, il y a ${N} ligne(s) à remplir. Donne jusqu'à ${N} éléments de réponse COURTS, DISTINCTS et COMPLÉMENTAIRES (un par ligne), du plus important au moins important, fondés UNIQUEMENT sur les extraits ci-dessus, en restant sur le sujet du libellé. AUCUNE répétition entre les éléments. AUCUNE donnée inventée (nom, date, SIRET/SIREN, CNAPS, agrément, adresse, téléphone, email) absente des sources. Si tu n'as de quoi remplir que k < ${N} lignes, ne donne QUE k éléments (les lignes restantes resteront vides) — ne meuble JAMAIS.
+Renvoie UNIQUEMENT un objet JSON : {"items": ["ligne 1", "ligne 2", ...]} (au plus ${N} éléments, dans l'ordre).`;
+      const aiResponse = await this.callOpenAI(
+        [{ role: 'system', content: systemPrompt }, { role: 'user', content: userPrompt }],
+        0.3, `Zone "${zone.label.slice(0, 30)}" (${N}l)`, true,
+      );
+      if (aiResponse === null) return;
+      try {
+        const data = JSON.parse(aiResponse || '{}');
+        const items: any[] = Array.isArray(data.items) ? data.items : [];
+        zone.fields.forEach((f, i) => {
+          const v = items[i];
+          if (v !== undefined && v !== null && String(v).trim()) replacements.push({ id: f.id, value: String(v) });
+        });
+      } catch (e) {
+        console.error(`[MemoireGenerator] Zone "${zone.label.slice(0, 30)}": parse JSON échoué:`, (aiResponse || '').slice(0, 160));
+      }
+    };
+
+    // Aiguillage : zone multi-lignes → answerZone (1 appel, N éléments distincts) ; zone d'1 ligne →
+    // answerField (logique 3 niveaux) ; cases/tableaux (hors zones) → answerField individuellement.
+    const inZone = new Set(zones.flatMap(z => z.fields.map(f => f.id)));
+    const others = descriptors.filter(d => !inZone.has(d.id));
+    const jobs: Array<() => Promise<void>> = [
+      ...zones.map(z => z.fields.length > 1 ? () => answerZone(z) : () => answerField(z.fields[0])),
+      ...others.map(d => () => answerField(d)),
+    ];
+    console.log(`[MemoireGenerator] Rédaction : ${zones.filter(z => z.fields.length > 1).length} zone(s) multi-lignes + ${jobs.length - zones.filter(z => z.fields.length > 1).length} champ(s) simples...`);
+    await runPool(jobs, 2);
 
     // Passe de complétion : rattrape les champs sans valeur (appel ayant échoué).
     const answeredIds = new Set(replacements.map(r => r.id));
@@ -2473,22 +2577,30 @@ ${fieldAsk && fieldAsk !== f.context ? `IMPORTANT — RESTE STRICTEMENT SUR LE S
     };
 
     // ── Lignes-réponse PARASITES (sur-découpage du cadre client) ──
-    // Sous un libellé, le gabarit a souvent PLUSIEURS lignes pointillées : seule la 1re est la vraie
-    // zone de réponse (son champ porte le libellé comme « Question: »). Les suivantes sont détectées
-    // comme des champs-réponse SANS question propre (« Question: \":\" » ou vide) → ce sont des lignes
-    // EN TROP du gabarit, pas de vraies questions. On n'y laisse AUCUN texte IA : on remet la valeur à
-    // VIDE → seul subsiste ce qui était DÉJÀ dans le template de référence (le « : » et les pointillés
-    // sont des runs d'origine, conservés). On ne touche ni aux cellules de tableau ni aux cases.
+    // Sous un libellé, le gabarit a souvent PLUSIEURS lignes pointillées : seule la 1re porte le
+    // libellé comme « Question: » ; les suivantes sont détectées comme des champs-réponse SANS
+    // question propre (« Question: \":\" » ou vide). On ne les vide PAS systématiquement (ça
+    // supprimait du contenu pertinent — « Réunions de suivi mensuelles », « Primes… »). On ne vide
+    // QUE celles qui n'apportent AUCUNE info réelle : un placeholder seul, ou un simple LIBELLÉ déjà
+    // présent dans le contexte (recopié par le modèle). Le contenu distinct est CONSERVÉ. On ne
+    // touche ni aux cellules de tableau ni aux cases.
     {
       const valById = new Map<number, string>(replacements.map(r => [r.id, String(r.value)]));
+      const alnum = (s: string) => normCtx(s).replace(/[^a-z0-9]+/g, '');
       let cleared = 0;
       for (const d of descriptors) {
         if (d.kind !== 'answer') continue;
         const q = (d.context.match(/Question:\s*"([^"]*)"/) || [])[1] || '';
-        const qClean = q.replace(/[\s.:;,…\-—–/|()]+/g, '');   // question « vide » une fois la ponctuation retirée
-        if (qClean.length === 0 && (valById.get(d.id) ?? '').trim()) { valById.set(d.id, ''); cleared++; }
+        const qClean = q.replace(/[\s.:;,…\-—–/|()]+/g, '');
+        if (qClean.length !== 0) continue;                       // a une vraie question → on GARDE
+        const v = (valById.get(d.id) ?? '').trim();
+        if (!v) continue;
+        // Résidu = valeur sans les placeholders. Rien, ou un libellé déjà dans le contexte → on vide.
+        const residual = alnum(v.replace(/\[?\s*[àa]\s*compl[ée]ter\s*\]?/gi, ''));
+        const noRealInfo = residual.length < 3 || alnum(d.context).includes(residual);
+        if (noRealInfo) { valById.set(d.id, ''); cleared++; }    // sinon : contenu distinct → CONSERVÉ
       }
-      if (cleared) console.log(`[MemoireGenerator] Lignes parasites vidées (réponse sans question propre): ${cleared}`);
+      if (cleared) console.log(`[MemoireGenerator] Lignes parasites vidées (placeholder/libellé recopié): ${cleared}`);
       replacements.forEach(r => { if (valById.has(r.id)) r.value = valById.get(r.id)!; });
     }
 
